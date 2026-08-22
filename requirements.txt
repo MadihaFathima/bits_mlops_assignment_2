@@ -1,0 +1,25 @@
+# Cats vs Dogs MLOps pipeline — pinned dependencies for reproducibility.
+# Install with:
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0 torchvision==0.28.0
+#   pip install -r requirements.txt
+# (torch/torchvision are pinned to their CPU-only builds and installed separately from the
+# PyTorch CPU wheel index, since PyPI's default index only hosts the CUDA builds.)
+
+# --- Core ML ---
+numpy==2.4.6
+pillow==12.3.0
+scikit-learn==1.9.0
+matplotlib==3.11.1
+
+# --- Experiment tracking & data versioning ---
+mlflow==3.15.1
+dvc==3.67.1
+
+# --- Inference API (M2) ---
+fastapi==0.141.1
+uvicorn==0.52.4
+pydantic==2.13.4
+
+# --- Testing (M3) ---
+pytest==8.4.2
+httpx==0.28.1
