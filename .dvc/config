@@ -1,0 +1,4 @@
+[core]
+    remote = localstorage
+['remote "localstorage"']
+    url = D:\Bits-SEM3\dvc-storage\mlops_assignment_2
