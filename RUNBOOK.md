@@ -95,10 +95,119 @@ d4b5ba8 Add dataset license and readme from Kaggle source
 86108ba Initialize DVC with local storage remote
 ```
 
+## M1 Task 2 design decisions (Model Building)
+
+- **CPU-only training** — no NVIDIA GPU available, so the baseline CNN is deliberately
+  shallow (3 conv+pool blocks + small FC head) rather than a deep architecture.
+- **Subsampling**: full 25,000-image raw dataset stays DVC-tracked as-is, but training
+  uses a balanced subsample of **4,000 images (2,000 cat + 2,000 dog)**, split 80/10/10
+  → 3,200 train / 400 val / 400 test. Chosen to keep CPU training time reasonable (an
+  engineering tradeoff, not a shortcut — documented here for the report).
+- **Preprocessing materializes real files**: resized 224x224 RGB JPEGs are written to
+  `data/processed/{train,val,test}/{cat,dog}/`, not just resized on-the-fly — this gives
+  a real artifact to `dvc add`, matching the assignment's "track pre-processed data"
+  wording.
+- **Augmentation** is applied on-the-fly during training (torchvision transforms: random
+  flip/rotation) on the train split only — not baked into the saved processed files. This
+  is standard practice (avoids inflating stored data, keeps val/test deterministic).
+- **Package installs** (run manually by user in `venv`, not via assistant-run commands —
+  see workflow note below):
+  ```
+  venv\Scripts\python.exe -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+  venv\Scripts\python.exe -m pip install pillow scikit-learn matplotlib mlflow
+  ```
+
+## M1 Task 2 execution — preprocessing
+
+- Created `requirements.txt` with pinned versions for all key libraries (torch/torchvision
+  installed separately from the PyTorch CPU wheel index, since PyPI's default index only
+  hosts CUDA builds).
+- Wrote `src/data/preprocess.py`:
+  - `is_valid_image()` — filters corrupt/zero-byte files via Pillow open+verify.
+  - `list_valid_images()`, `split_paths()`, `save_resized()`, `process_class()` — pure,
+    independently testable helpers (used for M3 unit tests later).
+  - Run via `python -m src.data.preprocess` (not as a plain file path) so that
+    `src`/`src.data` resolve correctly as packages and the project root is on `sys.path` —
+    needed once other modules start importing from `src.data.*`.
+  - Added `src/__init__.py`, `src/data/__init__.py` to make them proper packages.
+- Ran it: scanned `data/raw/PetImages/{Cat,Dog}` (25,000 raw files), filtered corrupt
+  ones, subsampled 2,000 valid images per class (seed=42), split 80/10/10, resized to
+  224x224 RGB, wrote to `data/processed/{train,val,test}/{cat,dog}/`.
+- Verified output: 1,600/1,600 train, 200/200 val, 200/200 test (cat/dog), total 4,000
+  files; spot-checked a sample image is exactly `(224, 224)` in `RGB` mode.
+- DVC-tracked the result:
+  ```
+  dvc add data/processed
+  dvc push
+  ```
+  Pointer file `data/processed.dvc` records 4,000 files, ~37.6MB.
+- Committed code + processed-data pointer to git (commit `d3d370a`,
+  "Add preprocessing script; DVC-track processed dataset").
+
+## M1 Task 2 execution — baseline model + training script
+
+- Wrote `src/models/model.py` — `SimpleCNN`: 3 conv+ReLU+maxpool blocks (3→32→64→128
+  channels), `AdaptiveAvgPool2d((7,7))` to keep the flattened feature size small
+  regardless of input resolution, then a small FC head (6272→128→1) outputting a single
+  logit for `BCEWithLogitsLoss`. Deliberately shallow given CPU-only training.
+- Wrote `src/models/train.py`:
+  - `build_dataloaders()` — `torchvision.datasets.ImageFolder` over
+    `data/processed/{train,val,test}`; class-to-index mapping is alphabetical, so
+    `cat=0`, `dog=1`. Train loader gets `RandomHorizontalFlip` + `RandomRotation(15)`
+    augmentation; val/test loaders use a plain (no-augmentation) transform, both use
+    ImageNet mean/std normalization.
+  - `run_epoch()` — shared train/eval step (acts as trainer when given an optimizer,
+    evaluator otherwise), returns avg loss + accuracy.
+  - Trains for `--epochs` (default 10), logging train/val loss & accuracy to MLflow every
+    epoch; evaluates on the test set at the end (accuracy, precision, recall, F1,
+    confusion matrix via scikit-learn).
+  - Saves a loss-curve plot and confusion-matrix plot under `outputs/`, logs both as
+    MLflow artifacts (satisfies M1 Task 3's "confusion matrix, loss curves" requirement).
+  - Saves the trained model to `models/cnn_baseline.pt` (`torch.save(state_dict)`), also
+    logs it via `mlflow.pytorch.log_model` for the run's model artifact/registry entry.
+  - Writes `models/model_metadata.json` (run ID + test metrics) for later use when
+    packaging the model for serving in M2.
+  - MLflow experiment name: `cats-vs-dogs-classification` (mirrors Assignment 1's
+    `heart-disease-classification` naming convention). Local file-based tracking
+    (`./mlruns`, gitignored), viewable via `mlflow ui --backend-store-uri ./mlruns`.
+  - Run via `python -m src.models.train` for the same package-resolution reason as
+    preprocessing.
+- **Bug hit on first run**: `mlflow.pytorch.log_model(model, "model")` failed after all
+  10 epochs completed — this MLflow version (3.15.1) defaults to PyTorch's `pt2`
+  (torch.export trace-based) serialization format, which requires an example input
+  tensor to trace the model graph. Training itself, the loss/confusion-matrix plots, and
+  `models/cnn_baseline.pt` had already been saved/logged successfully before this failed
+  step; only the MLflow "logged model" entry and `model_metadata.json` were missed on
+  that run (recorded as a `FAILED` run in `mlruns/`, harmless, left as-is).
+  Fix: pass `input_example=example_input[:1].numpy()` (one sample from the test loader)
+  to `log_model`, and switched to the `name=` kwarg (`artifact_path` is deprecated in
+  this version).
+- **Re-ran successfully.** Results (run `9a622c5b19bb4e8dab8280c7fb374abf`, MLflow
+  experiment id `1`):
+
+  | Metric | Value |
+  |---|---|
+  | Test accuracy | 0.7625 |
+  | Test precision | 0.7561 |
+  | Test recall | 0.7750 |
+  | Test F1 | 0.7654 |
+
+  Loss curve shows normal train/val convergence with mild overfitting starting around
+  epoch 6-7 (train loss keeps dropping to ~0.44 while val plateaus ~0.49) — expected and
+  acceptable for a shallow baseline on a 3,200-image training set. Confusion matrix is
+  reasonably balanced (150/50 cat, 45/155 dog — no severe class bias).
+- Model versioning decision: `models/cnn_baseline.pt` (3.5MB) and
+  `models/model_metadata.json` are committed **directly to git**, not DVC — small enough
+  that git handles it fine, and keeps the model directly visible/downloadable in the repo
+  for M2 packaging (Docker can `COPY` it directly) without a `dvc pull` step.
+- `mlruns/` (MLflow's local tracking store) stays gitignored — not meant for git (grows
+  every run, best viewed via `mlflow ui --backend-store-uri ./mlruns`), but will be
+  included in the final zip deliverable so a grader can browse run history without
+  retraining.
+
 ## Next up (not yet done)
 
-- M1 Task 1 (cont.): DVC-track the *preprocessed* data as a separate artifact once
-  preprocessing exists (per assignment wording: "track pre-processed data").
-- M1 Task 2: preprocessing script (resize to 224x224 RGB, filter corrupt files, 80/10/10
-  split, train-only augmentation) + baseline PyTorch CNN + training script.
-- M1 Task 3: MLflow experiment tracking (params, metrics, confusion matrix, loss curves).
+- View the run in the MLflow UI to visually confirm all params/metrics/artifacts are
+  present (M1 Task 3 verification).
+- M2: Inference Service — FastAPI wrapper around `cnn_baseline.pt` with `/health` and
+  `/predict` endpoints, then Dockerfile + local build/run verification.

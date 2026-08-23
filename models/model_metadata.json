@@ -1,0 +1,11 @@
+{
+  "run_id": "9a622c5b19bb4e8dab8280c7fb374abf",
+  "class_to_idx": {
+    "cat": 0,
+    "dog": 1
+  },
+  "test_accuracy": 0.7625,
+  "test_precision": 0.7560975609756098,
+  "test_recall": 0.775,
+  "test_f1": 0.7654320987654321
+}
