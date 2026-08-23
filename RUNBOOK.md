@@ -205,9 +205,27 @@ d4b5ba8 Add dataset license and readme from Kaggle source
   included in the final zip deliverable so a grader can browse run history without
   retraining.
 
+## MLflow UI — filestore "maintenance mode" (troubleshooting note)
+
+Running `mlflow ui --backend-store-uri ./mlruns` with MLflow 3.15.1 (this project's
+pinned version) fails with:
+```
+MlflowException: The filesystem tracking backend (e.g., './mlruns') is in maintenance
+mode and will not receive further updates. ... set MLFLOW_ALLOW_FILE_STORE=true to opt
+out of this exception.
+```
+Newer MLflow versions deprecated the plain filesystem backend for the **UI/server**
+specifically — this does *not* affect the Python tracking client (`train.py` writes to
+`./mlruns` without issue; only starting the UI server against it is restricted). Rather
+than migrate to a SQLite backend (`sqlite:///mlflow.db`, MLflow's recommended path, but
+requires changing `train.py`'s tracking URI and re-running training), we opted out via
+the documented escape hatch, keeping the same local file-based setup as Assignment 1:
+```
+$env:MLFLOW_ALLOW_FILE_STORE="true"; venv\Scripts\python.exe -m mlflow ui --backend-store-uri ./mlruns
+```
+UI confirmed working at http://127.0.0.1:5000 after this.
+
 ## Next up (not yet done)
 
-- View the run in the MLflow UI to visually confirm all params/metrics/artifacts are
-  present (M1 Task 3 verification).
 - M2: Inference Service — FastAPI wrapper around `cnn_baseline.pt` with `/health` and
   `/predict` endpoints, then Dockerfile + local build/run verification.
