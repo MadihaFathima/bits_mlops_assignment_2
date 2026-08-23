@@ -364,10 +364,20 @@ predictions verified via curl against the actual running container.
   needs `src/` + the committed model file. Training/data-versioning stays a local
   (DVC-tracked) concern; CI's job is build/test/package/publish.
 
+**Troubleshooting**: first CI run failed both test collection with
+`ModuleNotFoundError: No module named 'src'`. Cause: the workflow's test step ran the
+bare `pytest tests/ -v` command, not `python -m pytest`. As established earlier in this
+project (see the M1 preprocessing notes), only `-m pytest` adds the project root to
+`sys.path`, which `from src.data.preprocess import ...`-style absolute imports need —
+running `pytest` directly instead only adds the test file's own directory. Same class of
+bug as the earlier "why `-m src.data.preprocess` and not the file path" question, just
+hitting `pytest` this time instead of a training/preprocessing script. Fixed by changing
+the workflow step to `python -m pytest tests/ -v`.
+
 ## Next up (not yet done)
 
-- Push `.github/workflows/ci.yml` + tests, confirm the workflow runs green on GitHub and
-  the image appears in GHCR packages.
+- Push the CI fix, confirm the workflow runs green on GitHub and the image appears in
+  GHCR packages.
 - M4: CD Pipeline & Deployment — Kubernetes manifests (Deployment + Service) for Docker
   Desktop's built-in K8s, GitOps-style auto-deploy on `main` changes, post-deploy smoke
   test.
