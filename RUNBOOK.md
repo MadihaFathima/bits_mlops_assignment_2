@@ -205,27 +205,130 @@ d4b5ba8 Add dataset license and readme from Kaggle source
   included in the final zip deliverable so a grader can browse run history without
   retraining.
 
-## MLflow UI — filestore "maintenance mode" (troubleshooting note)
+## MLflow UI — filestore "maintenance mode" + split storage (troubleshooting notes)
 
-Running `mlflow ui --backend-store-uri ./mlruns` with MLflow 3.15.1 (this project's
-pinned version) fails with:
+**First symptom**: `mlflow ui --backend-store-uri ./mlruns` failed outright:
 ```
 MlflowException: The filesystem tracking backend (e.g., './mlruns') is in maintenance
 mode and will not receive further updates. ... set MLFLOW_ALLOW_FILE_STORE=true to opt
 out of this exception.
 ```
-Newer MLflow versions deprecated the plain filesystem backend for the **UI/server**
-specifically — this does *not* affect the Python tracking client (`train.py` writes to
-`./mlruns` without issue; only starting the UI server against it is restricted). Rather
-than migrate to a SQLite backend (`sqlite:///mlflow.db`, MLflow's recommended path, but
-requires changing `train.py`'s tracking URI and re-running training), we opted out via
-the documented escape hatch, keeping the same local file-based setup as Assignment 1:
+Worked around with `$env:MLFLOW_ALLOW_FILE_STORE="true"` — the UI then started, but the
+experiment showed as **empty** (no runs), even though training had clearly succeeded.
+
+**Real root cause**: `train.py` never explicitly sets `mlflow.set_tracking_uri(...)`.
+MLflow 3.x's implicit defaults turned out to be *split*: tracking metadata (experiments,
+runs, params, metrics) went to a local SQLite file, **`mlflow.db`**, auto-created in the
+project root — while artifacts (`log_artifact`/`log_model` files) still went to
+`./mlruns/<experiment_id>/<run_id>/artifacts/` as before. Pointing the UI at `./mlruns`
+only searches that folder for run metadata (`meta.yaml`, `params/`, `metrics/`), finds
+none there (confirmed: those run folders contained only an `artifacts/` subfolder), and
+reports empty — despite the artifact files genuinely being present.
+
+**Fix**: point the UI at the SQLite store instead, which is where the real metadata is
+(confirmed via a direct `sqlite3` query showing the `cats-vs-dogs-classification`
+experiment and all 3 runs, including the successful `FINISHED` one):
 ```
-$env:MLFLOW_ALLOW_FILE_STORE="true"; venv\Scripts\python.exe -m mlflow ui --backend-store-uri ./mlruns
+venv\Scripts\python.exe -m mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
-UI confirmed working at http://127.0.0.1:5000 after this.
+No `MLFLOW_ALLOW_FILE_STORE` needed for this path — SQLite is the backend MLflow
+actually wants. `mlflow.db` is gitignored (regenerated locally by re-running training;
+not meant for git). **This is now the canonical command to view experiments for this
+project.**
+
+**Verified in the UI**: run `puzzled-colt-687` (`9a622c5b19bb4e8dab8280c7fb374abf`) shows
+correct Parameters (architecture, epochs, batch_size, lr, split sizes), Metrics
+(per-epoch train/val loss & accuracy, final test accuracy/precision/recall/F1), and
+Artifacts (`confusion_matrix.png`, `loss_curve.png`, `cnn_baseline.pt`,
+`model_metadata.json`, and a `model/` folder with the MLflow-logged model — MLmodel
+manifest, conda/python env specs, input examples). **M1 confirmed fully complete.**
+
+## M1 — complete
+
+All three M1 tasks (Data & Code Versioning, Model Building, Experiment Tracking) are
+done and verified: git + DVC versioning in place, baseline CNN trained (76.25% test
+accuracy) and saved, MLflow tracking confirmed working end-to-end in the UI.
 
 ## Next up (not yet done)
 
 - M2: Inference Service — FastAPI wrapper around `cnn_baseline.pt` with `/health` and
   `/predict` endpoints, then Dockerfile + local build/run verification.
+
+## M2 Task 1 — Inference Service (FastAPI)
+
+- Refactored transforms into `src/data/transforms.py` (`get_train_transform()`,
+  `get_eval_transform()`, shared `CLASS_NAMES = ["cat", "dog"]`) so training and
+  inference use identical preprocessing — avoids train/serve skew. `get_eval_transform()`
+  adds a `Resize(224, 224)` step (a no-op on already-224x224 processed files, but
+  necessary for arbitrary-sized images arriving via the API). `train.py` updated to
+  import from here instead of defining transforms inline.
+- `src/api/inference.py` — `load_model(path)` and `predict(model, image) -> dict`, kept
+  separate from the FastAPI layer so they're unit-testable without a running server
+  (target for M3's "model utility/inference function" test).
+- `src/api/main.py` — FastAPI app, model loaded once at startup via a `lifespan` context
+  manager (not per-request):
+  - `GET /health` → `{"status": "healthy"}`
+  - `POST /predict` → multipart file upload (`UploadFile`), validates content-type and
+    that the bytes decode as an image, returns `{label, probability, class_probabilities}`
+  - `MODEL_PATH` overridable via env var, defaults to `models/cnn_baseline.pt`
+  - Request/response logging and metrics deliberately deferred to M5 (Monitoring), to
+    keep M2 scoped to the two required endpoints + packaging.
+- Added `python-multipart` to `requirements.txt` (required by FastAPI for file uploads).
+- Created `docker/requirements.txt` — leaner, inference-only dependency list (numpy,
+  pillow, fastapi, uvicorn, pydantic, python-multipart; torch/torchvision installed
+  separately from the CPU wheel index). Excludes dvc/mlflow/matplotlib/scikit-learn/pytest
+  to keep the eventual container image smaller.
+- **Verified locally**: ran `uvicorn src.api.main:app --reload --port 8000`, tested both
+  endpoints with `curl`.
+  - `/health` returned `{"status": "healthy"}`.
+  - `/predict` on `data/processed/test/cat/cat_00000.jpg` returned `label: "dog"`
+    (dog_prob=0.6448) — initially looked like a bug, but cross-checked against the exact
+    same evaluation pipeline `train.py` used to measure 76.25% test accuracy (loading the
+    same image via `ImageFolder` + `get_eval_transform()`) and got the **identical**
+    dog_prob=0.6448. Confirms the API reproduces the model's real behavior with no
+    train/serve skew — this image is simply one of the ~50/200 test cats the baseline
+    model gets wrong, consistent with the known confusion matrix. Not a bug.
+  - `/predict` on other test images (dogs, other cats) returned correct labels with
+    reasonable confidence.
+
+## M2 Task 3 — Containerization
+
+- Created `.dockerignore` (excludes `venv/`, `data/` [826MB], `mlruns/`, `.git/`, `.dvc/`,
+  `notebooks/`, `outputs/`, `tests/`) — without it, `docker build`'s build context would
+  include the entire raw dataset and venv, extremely slow to send to the daemon.
+- `docker/Dockerfile`: `python:3.11-slim` base, installs CPU torch/torchvision from the
+  PyTorch wheel index as its own layer *before* copying app code (so code changes don't
+  invalidate the large PyTorch download layer on rebuild), then `docker/requirements.txt`,
+  then copies only `src/` and `models/cnn_baseline.pt` (not training data or scripts'
+  other dependencies). `HEALTHCHECK` polls `/health` every 30s. Runs via
+  `uvicorn src.api.main:app --host 0.0.0.0 --port 8000`.
+- **Troubleshooting**: first build attempt failed —
+  `failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine` —
+  because Docker Desktop wasn't running (the CLI was installed, but its background engine
+  needs the Docker Desktop application launched). Started Docker Desktop, waited for
+  "Engine running," confirmed via `docker info`, then proceeded.
+- **Built and verified successfully**:
+  ```
+  docker build -f docker\Dockerfile -t cats-dogs-api:latest .
+  docker run -d --name cats-dogs-api -p 8000:8000 cats-dogs-api:latest
+  ```
+  Image: `cats-dogs-api:latest`, 327MB content size. Container status confirmed
+  `Up ... (healthy)` — i.e. the Dockerfile's `HEALTHCHECK` itself is passing, not just
+  that the process started. `curl http://localhost:8000/health` →
+  `{"status":"healthy"}`. `curl -X POST -F "file=@..." http://localhost:8000/predict` on
+  a dog test image → correctly returned `label: "dog"` with 66% confidence.
+
+## M2 — complete
+
+All three M2 tasks done and verified: FastAPI inference service with `/health` +
+`/predict`, pinned dependencies (root `requirements.txt` for dev/training, leaner
+`docker/requirements.txt` for the inference image), Dockerfile built and run locally with
+predictions verified via curl against the actual running container.
+
+## Next up (not yet done)
+
+- M3: Automated Testing — pytest unit tests for a data preprocessing function
+  (`is_valid_image` or `split_paths` from `src/data/preprocess.py`) and a model
+  utility/inference function (`predict` from `src/api/inference.py`).
+- M3: CI pipeline (GitHub Actions) — checkout, install deps, run tests, build Docker
+  image, push to a container registry.

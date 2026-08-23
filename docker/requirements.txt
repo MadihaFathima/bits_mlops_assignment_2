@@ -1,0 +1,11 @@
+# Minimal runtime dependencies for the FastAPI inference service container.
+# Excludes dev/training-only tools (dvc, mlflow, matplotlib, scikit-learn, pytest) to
+# keep the image lean. Install torch/torchvision from the CPU wheel index first:
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0 torchvision==0.28.0
+#   pip install -r docker/requirements.txt
+numpy==2.4.6
+pillow==12.3.0
+fastapi==0.141.1
+uvicorn==0.52.4
+pydantic==2.13.4
+python-multipart==0.0.32

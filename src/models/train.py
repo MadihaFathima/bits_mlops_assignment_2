@@ -13,29 +13,15 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from torchvision import datasets
 
+from src.data.transforms import get_eval_transform, get_train_transform
 from src.models.model import SimpleCNN
-
-NORM_MEAN = [0.485, 0.456, 0.406]
-NORM_STD = [0.229, 0.224, 0.225]
 
 
 def build_dataloaders(data_dir: Path, batch_size: int) -> tuple[DataLoader, DataLoader, DataLoader, list[str]]:
-    train_transform = transforms.Compose(
-        [
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(15),
-            transforms.ToTensor(),
-            transforms.Normalize(NORM_MEAN, NORM_STD),
-        ]
-    )
-    eval_transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize(NORM_MEAN, NORM_STD),
-        ]
-    )
+    train_transform = get_train_transform()
+    eval_transform = get_eval_transform()
 
     train_ds = datasets.ImageFolder(data_dir / "train", transform=train_transform)
     val_ds = datasets.ImageFolder(data_dir / "val", transform=eval_transform)
