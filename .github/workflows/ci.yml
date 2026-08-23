@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: ghcr.io/madihafathima/bits_mlops_assignment_2
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0 torchvision==0.28.0
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest tests/ -v
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t $IMAGE_NAME:${{ github.sha }} -t $IMAGE_NAME:latest .
+
+      - name: Smoke test container
+        run: |
+          docker run -d --name smoke-test -p 8000:8000 $IMAGE_NAME:latest
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:8000/health; then
+              echo "Service healthy"
+              break
+            fi
+            echo "Waiting for service..."
+            sleep 2
+          done
+          curl -sf http://localhost:8000/health || (docker logs smoke-test && exit 1)
+          docker stop smoke-test
+          docker rm smoke-test
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        run: |
+          docker push $IMAGE_NAME:${{ github.sha }}
+          docker push $IMAGE_NAME:latest

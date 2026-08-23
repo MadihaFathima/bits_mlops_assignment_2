@@ -325,10 +325,49 @@ All three M2 tasks done and verified: FastAPI inference service with `/health` +
 `docker/requirements.txt` for the inference image), Dockerfile built and run locally with
 predictions verified via curl against the actual running container.
 
+## M3 Task 1 — Automated Testing
+
+- `tests/test_preprocess.py` (8 tests) — `is_valid_image()` against real/corrupt/empty/
+  missing files (using `tmp_path` fixtures, not the real dataset); `split_paths()` for
+  correct ratios, no overlap between splits, full coverage, determinism given a seed.
+- `tests/test_inference.py` (4 tests) — `predict()` against synthetic PIL images (not
+  real cat/dog photos, so tests don't depend on the dataset): output structure/keys,
+  probabilities sum to 1, handles non-square/non-224 images and grayscale input. Skips
+  gracefully if `models/cnn_baseline.pt` isn't present rather than failing.
+- All 12 tests pass via `python -m pytest tests/ -v`.
+
+## GitHub repository
+
+- Remote: `https://github.com/MadihaFathima/bits_mlops_assignment_2.git`
+- Renamed local branch `master` → `main` to match GitHub Actions / Assignment 1
+  convention. Pushed all commits through M3 Task 1.
+
+## M3 Task 2/3 — CI Pipeline (GitHub Actions) + Registry
+
+- `.github/workflows/ci.yml`, triggered on push/PR to `main`. Two jobs:
+  - **`test`**: checkout → Python 3.11 → install CPU torch/torchvision + `requirements.txt`
+    → `pytest tests/ -v`.
+  - **`build-and-push`** (`needs: test`, only runs if tests pass): checkout → `docker
+    build` → **smoke-test the image locally first** (run container, poll `/health` up to
+    15x with 2s delay, fail the job with container logs if it never comes up healthy) →
+    only then log in to GHCR and push. A broken image never gets published — same
+    "test before publish" pattern as Assignment 1's `docker-build-smoke-test` job.
+  - Registry: **GitHub Container Registry** (`ghcr.io/madihafathima/bits_mlops_assignment_2`).
+    Auth via the automatically-provided `GITHUB_TOKEN` (job-level
+    `permissions: packages: write`) — no manually-configured secrets needed, unlike
+    Docker Hub.
+- **Key design decision**: CI does *not* run `dvc pull` or retrain the model. Our DVC
+  remote is a local Windows folder (`D:\Bits-SEM3\dvc-storage\...`), unreachable from
+  GitHub's cloud runners. This isn't a gap: `models/cnn_baseline.pt` is committed
+  directly to git (per the M1 decision), so `actions/checkout` alone gives CI everything
+  it needs — tests use synthetic images, not the real dataset, and the Docker build only
+  needs `src/` + the committed model file. Training/data-versioning stays a local
+  (DVC-tracked) concern; CI's job is build/test/package/publish.
+
 ## Next up (not yet done)
 
-- M3: Automated Testing — pytest unit tests for a data preprocessing function
-  (`is_valid_image` or `split_paths` from `src/data/preprocess.py`) and a model
-  utility/inference function (`predict` from `src/api/inference.py`).
-- M3: CI pipeline (GitHub Actions) — checkout, install deps, run tests, build Docker
-  image, push to a container registry.
+- Push `.github/workflows/ci.yml` + tests, confirm the workflow runs green on GitHub and
+  the image appears in GHCR packages.
+- M4: CD Pipeline & Deployment — Kubernetes manifests (Deployment + Service) for Docker
+  Desktop's built-in K8s, GitOps-style auto-deploy on `main` changes, post-deploy smoke
+  test.
