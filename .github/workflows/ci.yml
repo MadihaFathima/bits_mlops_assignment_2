@@ -65,3 +65,33 @@ jobs:
         run: |
           docker push $IMAGE_NAME:${{ github.sha }}
           docker push $IMAGE_NAME:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: self-hosted
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply manifests and roll out new image
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl set image deployment/cats-dogs-api cats-dogs-api=$IMAGE_NAME:${{ github.sha }}
+          kubectl rollout status deployment/cats-dogs-api --timeout=300s
+
+      - name: Post-deploy smoke test
+        run: |
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/health; then
+              echo "Service healthy"
+              break
+            fi
+            echo "Waiting for service..."
+            sleep 3
+          done
+          curl -sf http://localhost:8080/health || (echo "Health check failed" && exit 1)
+          curl -sf -X POST -F "file=@tests/fixtures/sample_dog.jpg" http://localhost:8080/predict || (echo "Predict check failed" && exit 1)

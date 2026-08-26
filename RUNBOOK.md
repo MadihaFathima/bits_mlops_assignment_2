@@ -374,10 +374,72 @@ bug as the earlier "why `-m src.data.preprocess` and not the file path" question
 hitting `pytest` this time instead of a training/preprocessing script. Fixed by changing
 the workflow step to `python -m pytest tests/ -v`.
 
+Confirmed working after the fix: both `test` and `build-and-push` jobs pass on GitHub
+Actions.
+
+## M3 — complete
+
+All three M3 tasks done: 12 pytest unit tests (preprocessing + inference), CI pipeline on
+GitHub Actions (checkout → install → test → build → smoke-test → push), image published
+to GHCR automatically on every push to `main`.
+
+## M4 Task 1 — Deployment Target & Manifests
+
+- **Architectural constraint identified up front**: the deployment target is Docker
+  Desktop's *local* Kubernetes cluster on this Windows machine. GitHub Actions' standard
+  cloud runners are ephemeral VMs with no network path to a local cluster — a normal
+  workflow job cannot run `kubectl apply` against it. Resolved by deciding to register
+  this machine as a **self-hosted GitHub Actions runner** (see below), rather than
+  settling for a manual/documented deploy script — chosen because it gives a genuinely
+  automatic push-to-deploy flow, which matters both for meeting the assignment's
+  "automatically on main branch changes" wording and for a much better demo video.
+- GHCR package visibility set to **Public** (via package settings → Danger Zone → Change
+  visibility) — avoids needing to manage an `imagePullSecret`/PAT for the cluster to pull
+  the image; acceptable since the image contains no sensitive data (model weights +
+  inference code only).
+- `k8s/deployment.yaml`: 2 replicas, resource requests/limits (250m/500m CPU,
+  256Mi/512Mi memory), `imagePullPolicy: Always` (so redeploys actually re-pull rather
+  than reuse a stale cached `:latest`).
+- `k8s/service.yaml`: `LoadBalancer` type, originally `port: 80`.
+- Confirmed Docker Desktop's Kubernetes was running (`kubectl cluster-info` reachable at
+  `docker-desktop` context) before deploying.
+
+**Troubleshooting — pod startup/liveness crash loop**: first deploy attempt showed pods
+stuck `ContainerCreating` then `Running` but never `1/1` ready, eventually killed and
+restarted by the liveness probe (`kubectl describe pod` showed
+`Liveness probe failed: ... connection refused`, then `Killing ... will be restarted`).
+Root cause: the container takes longer than the liveness probe's ~50s tolerance
+(20s initial delay + 3×10s failures) to finish importing PyTorch and loading the model —
+made worse by the 500m CPU limit throttling that import. Kubernetes killed the container
+for being "unhealthy" before it had even finished starting, then repeated the cycle
+forever. Fixed properly (not just by loosening the existing probes) by adding a
+**`startupProbe`** (`periodSeconds: 5, failureThreshold: 30` → up to 150s grace before
+liveness/readiness probes even begin evaluating) — the K8s-native solution for
+slow-starting containers, since it doesn't permanently weaken liveness responsiveness
+once the app is actually up. Also added `PYTHONUNBUFFERED=1` to the Dockerfile — logs
+were showing up empty during debugging because Python buffers stdout by default when not
+attached to a TTY, which made this issue harder to diagnose than necessary.
+
+**Troubleshooting — service routing conflict**: after the startup fix, pods reached
+`1/1 Running`, but `curl http://localhost/health` returned `{"status":"ok"}` (not our
+app's actual `{"status":"healthy"}`) and `/predict` errored. Root cause: Assignment 1's
+`heart-disease-api-service` is still running on this same shared local cluster and is
+*also* a `LoadBalancer` on port 80 — `kubectl get svc -o wide` confirmed it already held
+the external IP, while `cats-dogs-api-service` sat at `EXTERNAL-IP: <pending>`, unable to
+bind host port 80. Fixed by changing our service to **port 8080** instead (not by
+touching/stopping the Assignment 1 service, which is prior graded work). Even after that
+edit, the service stayed `<pending>` — `kubectl apply` performed an in-place update, but
+Docker Desktop's lightweight LoadBalancer controller apparently only assigns an external
+IP at object *creation*, not on updates. Fixed by `kubectl delete -f k8s/service.yaml`
+then `kubectl apply -f k8s/service.yaml` (recreate from scratch), which got a real
+external IP (`172.18.0.6`) immediately. Verified via
+`curl http://localhost:8080/health` → `{"status":"healthy"}` and a correct `/predict`
+result against the real service.
+
 ## Next up (not yet done)
 
-- Push the CI fix, confirm the workflow runs green on GitHub and the image appears in
-  GHCR packages.
-- M4: CD Pipeline & Deployment — Kubernetes manifests (Deployment + Service) for Docker
-  Desktop's built-in K8s, GitOps-style auto-deploy on `main` changes, post-deploy smoke
-  test.
+- Set up a self-hosted GitHub Actions runner on this machine.
+- Extend `.github/workflows/ci.yml` with a `deploy` job (runs on the self-hosted runner,
+  only on push to `main`): `kubectl set image` to the newly-pushed `:sha`-tagged image,
+  `kubectl rollout status`, then a post-deploy smoke test (`/health` + `/predict`) that
+  fails the job if the deployed service doesn't respond correctly.
