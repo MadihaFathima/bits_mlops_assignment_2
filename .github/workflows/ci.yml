@@ -72,7 +72,13 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     defaults:
       run:
-        shell: bash
+        # Pin to Git Bash explicitly. A bare "shell: bash" resolves to whichever
+        # bash.exe is first on PATH, which on this machine is the WSL shim
+        # (C:\Windows\System32\bash.exe) rather than Git Bash. WSL runs in its own
+        # isolated network namespace, so 127.0.0.1:<port> inside WSL is NOT the same
+        # as the Windows host's 127.0.0.1 that Docker Desktop's Kubernetes API server
+        # binds to -- causing kubectl connection timeouts from inside WSL bash.
+        shell: 'C:\Program Files\Git\bin\bash.exe --noprofile --norc -e -o pipefail {0}'
     steps:
       - uses: actions/checkout@v4
 

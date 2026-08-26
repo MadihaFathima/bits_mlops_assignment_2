@@ -436,10 +436,65 @@ external IP (`172.18.0.6`) immediately. Verified via
 `curl http://localhost:8080/health` → `{"status":"healthy"}` and a correct `/predict`
 result against the real service.
 
+## M4 Task 2 — Self-hosted runner + automated deploy job
+
+- Registered this Windows machine as a GitHub Actions self-hosted runner (repo Settings
+  → Actions → Runners → New self-hosted runner → downloaded/configured/ran per GitHub's
+  generated instructions). Attempted to install as a Windows service (needs admin
+  privileges); fell back to running interactively via `./run.cmd` in an open terminal
+  ("Listening for Jobs") — sufficient for now, though it only listens while that terminal
+  stays open. Revisit installing as a persistent service later if needed.
+- Added a `deploy` job to `.github/workflows/ci.yml`: `needs: build-and-push`,
+  `runs-on: self-hosted`, gated to `push` events on `main` only (not PRs — a self-hosted
+  runner shouldn't execute arbitrary PR-triggered code against local infra). Applies
+  `k8s/deployment.yaml`/`service.yaml`, then `kubectl set image` to the exact
+  `:${{ github.sha }}` tag (guarantees a real rollout every time, avoiding the classic
+  "K8s doesn't notice `:latest` changed" trap), `kubectl rollout status`, then a
+  post-deploy smoke test (`/health` + a real `/predict` call using a small fixture image
+  committed directly to git at `tests/fixtures/sample_dog.jpg`, since a workflow step
+  shouldn't depend on pulling DVC-tracked data) — **fails the job** if either check fails,
+  satisfying the assignment's explicit requirement.
+
+**Troubleshooting — stale/uncommitted files caught by CI, not caught locally**:
+1. First run failed both jobs with `ModuleNotFoundError: No module named 'src'` in
+   `test` — same root cause as the earlier preprocessing `-m` question: the CI step ran
+   bare `pytest`, not `python -m pytest`. Fixed.
+2. Discovered mid-debugging that `k8s/service.yaml` had a **local uncommitted edit**
+   (still committed as `port: 80`, the version that caused the Assignment-1 port
+   conflict) — the live cluster had been fixed manually via `kubectl apply`/`delete`
+   earlier, but the *file* fix was never actually committed. This would have made the
+   `deploy` job re-introduce the exact port-80 conflict on every automated deploy. Caught
+   via `git status`/`git show HEAD:... ` comparison before it could bite; committed the
+   real fix.
+3. A workflow run appeared "not reflecting" on the Actions UI — turned out to be a
+   genuine (if confusing) sequence of a hung GitHub-hosted cleanup step
+   ("Post Run actions/checkout@v4" stuck `in_progress` for several minutes on the
+   `build-and-push` job, unrelated to this project's code — a rare cloud-runner
+   infrastructure hiccup) blocking the dependent `deploy` job from starting. Verified via
+   GitHub's REST API directly (`/actions/runs`, `/actions/runs/{id}/jobs`) rather than
+   trusting the browser UI, which helped distinguish "not triggered" from "triggered but
+   stuck."
+4. **Real bug, the interesting one**: once `deploy` finally ran, `kubectl apply` failed
+   with a raw Windows socket timeout (`Error code: Bash/Service/0x8007274c`) — but
+   `kubectl cluster-info` succeeded fine when run manually in both PowerShell and Git
+   Bash on the same machine immediately after. Root cause found by expanding the full
+   step log: the workflow's `shell: bash` default resolved to
+   **`C:\Windows\System32\bash.exe`** (the WSL launcher shim), not real Git Bash —
+   visible only in the step's `shell:` metadata line in the full log, not the collapsed
+   summary. WSL runs in its own isolated network namespace; `127.0.0.1:<port>` inside WSL
+   is not the Windows host's `127.0.0.1` that Docker Desktop's Kubernetes API server
+   binds to, so `kubectl` timed out trying to reach it from inside WSL bash. This
+   machine has three `bash.exe` on PATH (Git Bash, the WSL shim, and a WindowsApps
+   stub) — the WSL one apparently wins when only the bare name `bash` is given. **Fixed**
+   by pinning the `deploy` job's shell explicitly to
+   `C:\Program Files\Git\bin\bash.exe --noprofile --norc -e -o pipefail {0}` instead of
+   the ambiguous `shell: bash`.
+
 ## Next up (not yet done)
 
-- Set up a self-hosted GitHub Actions runner on this machine.
-- Extend `.github/workflows/ci.yml` with a `deploy` job (runs on the self-hosted runner,
-  only on push to `main`): `kubectl set image` to the newly-pushed `:sha`-tagged image,
-  `kubectl rollout status`, then a post-deploy smoke test (`/health` + `/predict`) that
-  fails the job if the deployed service doesn't respond correctly.
+- Push the shell-path fix, confirm the `deploy` job succeeds end-to-end (manifests
+  applied, image rolled out to the exact commit's tag, post-deploy smoke test passes).
+- M4 Task 3 verification: confirm the pipeline actually fails if a smoke test fails
+  (already implemented via `exit 1`, worth a deliberate negative test before final
+  submission).
+- M5: Monitoring, Logs & Final Submission.
