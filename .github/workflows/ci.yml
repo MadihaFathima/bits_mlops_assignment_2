@@ -87,7 +87,7 @@ jobs:
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
           kubectl set image deployment/cats-dogs-api cats-dogs-api=${{ env.IMAGE_NAME }}:${{ github.sha }}
-          kubectl rollout status deployment/cats-dogs-api --timeout=300s
+          kubectl rollout status deployment/cats-dogs-api --timeout=600s
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Post-deploy smoke test
