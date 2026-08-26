@@ -70,15 +70,15 @@ jobs:
     needs: build-and-push
     runs-on: self-hosted
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Using PowerShell (native, unambiguous on any Windows machine) instead of bash for
+    # this job. Bare "shell: bash" resolved to the WSL bash shim (C:\Windows\System32\
+    # bash.exe) instead of Git Bash, causing kubectl connection timeouts since WSL has
+    # its own network namespace where 127.0.0.1 isn't the Windows host's loopback.
+    # Pinning bash to its full Git install path then hit an unrelated GitHub Actions
+    # runner bug parsing absolute shell paths with spaces. PowerShell sidesteps both.
     defaults:
       run:
-        # Pin to Git Bash explicitly. A bare "shell: bash" resolves to whichever
-        # bash.exe is first on PATH, which on this machine is the WSL shim
-        # (C:\Windows\System32\bash.exe) rather than Git Bash. WSL runs in its own
-        # isolated network namespace, so 127.0.0.1:<port> inside WSL is NOT the same
-        # as the Windows host's 127.0.0.1 that Docker Desktop's Kubernetes API server
-        # binds to -- causing kubectl connection timeouts from inside WSL bash.
-        shell: 'C:\Program Files\Git\bin\bash.exe --noprofile --norc -e -o pipefail {0}'
+        shell: powershell
     steps:
       - uses: actions/checkout@v4
 
@@ -86,18 +86,23 @@ jobs:
         run: |
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
-          kubectl set image deployment/cats-dogs-api cats-dogs-api=$IMAGE_NAME:${{ github.sha }}
+          kubectl set image deployment/cats-dogs-api cats-dogs-api=${{ env.IMAGE_NAME }}:${{ github.sha }}
           kubectl rollout status deployment/cats-dogs-api --timeout=300s
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Post-deploy smoke test
         run: |
-          for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/health; then
-              echo "Service healthy"
-              break
-            fi
-            echo "Waiting for service..."
-            sleep 3
-          done
-          curl -sf http://localhost:8080/health || (echo "Health check failed" && exit 1)
-          curl -sf -X POST -F "file=@tests/fixtures/sample_dog.jpg" http://localhost:8080/predict || (echo "Predict check failed" && exit 1)
+          $healthy = $false
+          for ($i = 0; $i -lt 20; $i++) {
+            try {
+              $resp = Invoke-WebRequest -Uri http://localhost:8080/health -UseBasicParsing -TimeoutSec 5
+              if ($resp.StatusCode -eq 200) { $healthy = $true; break }
+            } catch {
+              Write-Output "Waiting for service..."
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $healthy) { Write-Error "Health check failed"; exit 1 }
+
+          curl.exe -sf -X POST -F "file=@tests/fixtures/sample_dog.jpg" http://localhost:8080/predict
+          if ($LASTEXITCODE -ne 0) { Write-Error "Predict check failed"; exit 1 }
