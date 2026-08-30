@@ -64,7 +64,7 @@ async def log_and_measure_requests(request: Request, call_next):
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "healthy", "version": "1.1"}
+    return {"status": "healthy", "version": "1.2"}
 
 
 @app.get("/metrics")
