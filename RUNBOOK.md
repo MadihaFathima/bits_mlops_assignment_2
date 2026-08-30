@@ -1,7 +1,8 @@
 # RUNBOOK — Cats vs Dogs MLOps Pipeline
 
-Step-by-step record of what has been done, why, and how to reproduce it.
-Course: MLOps (AIMLCZG523) — Assignment 2.
+Course: MLOps (AIMLCZG523) — Assignment 2. This is the detailed engineering log: what
+was built, why, and every non-obvious issue hit along the way with its root cause and
+fix. For setup/usage instructions, see **[README.md](README.md)**.
 
 ## Tooling decisions
 
@@ -12,178 +13,52 @@ Course: MLOps (AIMLCZG523) — Assignment 2.
 | Dataset versioning | DVC, local folder remote | No cloud account needed; demonstrates DVC mechanics |
 | CI/CD | GitHub Actions | Matches Assignment 1, free, integrates with GHCR |
 | Deployment target | Docker Desktop's built-in Kubernetes | Reuses the working `docker-desktop` kubectl context and image-resolution approach from Assignment 1, instead of standalone minikube |
-| Local Python | 3.11.9 (via `py -3.11`) | Only Python 3.14 was present on the machine; PyTorch/TensorFlow don't yet ship wheels for 3.14. Docker image also pins `python:3.11-slim` for consistency (matches Assignment 1) |
+| Local Python | 3.11.9 (via `py -3.11`) | Only Python 3.14 was present on the machine; PyTorch/TensorFlow don't yet ship wheels for 3.14. Docker image also pins `python:3.11-slim` for consistency |
 
-## Environment setup
+---
 
-- Verified installed tools: Docker 29.6.1, Git 2.54.0, kubectl v1.36.1, minikube v1.38.1 (not used — see deployment decision above).
-- Installed Python 3.11.9 via `winget install --id Python.Python.3.11 -e`, alongside the existing Python 3.14, to get a version compatible with PyTorch/DVC/MLflow.
-- Created project folder structure: `src/`, `data/`, `notebooks/`, `tests/`, `docker/`, `k8s/`.
-- Created a virtual environment at `venv/` using Python 3.11: `py -3.11 -m venv venv`.
+## M1 — Model Development & Experiment Tracking
 
-## Git & DVC setup (M1 Task 1 — Data & Code Versioning)
+### Data & code versioning
 
-1. `git init` in the project root.
-2. Configured global git identity:
-   ```
-   git config --global user.name "Madiha Fathima"
-   git config --global user.email "madihafathima10@gmail.com"
-   ```
-3. Created root `.gitignore` (`venv/`, `__pycache__/`, `*.pyc`, `.env`, `mlruns/`).
-4. Installed DVC into the venv: `pip install dvc` (v3.67.1).
-5. `dvc init` — created `.dvc/config`, `.dvc/.gitignore`, `.dvcignore`.
-6. Added a **local folder DVC remote** (outside the repo, so it doesn't get committed to git):
-   ```
-   dvc remote add -d localstorage D:/Bits-SEM3/dvc-storage/mlops_assignment_2
-   ```
-7. Committed DVC config to git (commit `86108ba`, "Initialize DVC with local storage remote").
-
-Note on `.gitignore` files: DVC auto-generates its own `.gitignore` entries next to
-whatever it tracks (`.dvc/.gitignore` for its internal state, `data/raw/.gitignore` once
-`dvc add` runs on a folder there). These are left as DVC manages them — merging them into
-the root `.gitignore` would just get overwritten/fought on the next `dvc add`. The root
-`.gitignore` is reserved for everything DVC doesn't touch (venv, caches, env files).
-
-## Dataset acquisition
-
+- Git for source, DVC (local folder remote at `D:/Bits-SEM3/dvc-storage/mlops_assignment_2`)
+  for datasets.
 - Dataset: **Microsoft Cats vs Dogs** (`shaunthesheep/microsoft-catsvsdogs-dataset` on
   Kaggle) — the original dataset behind the classic Kaggle "Dogs vs. Cats" competition.
-  Chosen over pre-split alternatives because it's raw/unsplit, matching the assignment's
-  instruction to preprocess and split the data ourselves.
-- Kaggle auth: used Kaggle's newer **API token** method (not the legacy `kaggle.json`).
-  Token stored as a persistent Windows user environment variable `KAGGLE_API_TOKEN`,
-  which the `kaggle` Python package (v2.2.4) reads natively.
-- Downloaded via:
-  ```
-  kaggle datasets download -d shaunthesheep/microsoft-catsvsdogs-dataset -p data/raw --unzip
-  ```
-- Result: `data/raw/PetImages/Cat/` and `data/raw/PetImages/Dog/`, 25,000 images total
-  (12,500 per class), ~826MB. Also included: a Microsoft license doc and a readme, which
-  landed outside `PetImages/`.
-- **Known issue to handle during preprocessing**: this dataset has a small number of
-  corrupt/zero-byte JPEG files (long-documented quirk of the original Microsoft release,
-  reflected in the `.dvc` pointer file recording 25,002 files vs the expected 25,000
-  images — 2 extra non-image files were bundled inside `PetImages/`). Must filter these
-  out before training.
+  Chosen because it's raw/unsplit, matching the assignment's instruction to preprocess
+  and split the data ourselves. Downloaded via the `kaggle` CLI, authenticated with
+  Kaggle's newer API-token method (`KAGGLE_API_TOKEN` env var).
+- Result: 25,000 raw images (`data/raw/PetImages/{Cat,Dog}`), DVC-tracked (`dvc add` +
+  `dvc push`). **Known dataset quirk**: contains a small number of corrupt/zero-byte
+  files (long-documented in the original release) — filtered out during preprocessing.
+- Preprocessed data (resized 224×224 RGB, 80/10/10 split) also DVC-tracked as a separate
+  artifact from the raw data, per the assignment's "track pre-processed data" wording.
 
-## Dataset versioning with DVC
+### Model building
 
-1. `dvc add data/raw/PetImages` — hashed all files, created `data/raw/PetImages.dvc`
-   pointer file, moved actual data into DVC's cache, auto-updated `data/raw/.gitignore`.
-2. `dvc push` — copied the cached data to the local remote
-   (`D:/Bits-SEM3/dvc-storage/mlops_assignment_2`).
-3. Committed the pointer file to git:
-   ```
-   git add data/raw/PetImages.dvc data/raw/.gitignore
-   git commit -m "Track raw Cats vs Dogs dataset with DVC"
-   ```
-   (commit `5256604`)
-4. Committed the license/readme files from the Kaggle zip directly to git (not DVC —
-   they're tiny text/docx files, not bulk data):
-   ```
-   git add "data/raw/MSR-LA - 3467.docx" "data/raw/readme[1].txt"
-   git commit -m "Add dataset license and readme from Kaggle source"
-   ```
-   (commit `d4b5ba8`)
-5. Verified: `dvc status` reports "Data and pipelines are up to date."
+- `src/data/preprocess.py`: filters corrupt images (`is_valid_image`), subsamples a
+  **balanced 4,000 images** (2,000/class) from the full 25,000, splits 80/10/10, resizes
+  to 224×224 RGB, writes to `data/processed/{train,val,test}/{cat,dog}/`.
+  Subsampling (rather than training on all 25,000) was a deliberate engineering
+  tradeoff for CPU-only training time, not a shortcut.
+- `src/models/model.py`: `SimpleCNN` — 3 conv+ReLU+maxpool blocks (3→32→64→128
+  channels) + `AdaptiveAvgPool2d((7,7))` (keeps the FC layer small regardless of input
+  size) + a small FC head, single logit output for `BCEWithLogitsLoss`. Deliberately
+  shallow given CPU-only training.
+- `src/models/train.py`: trains via `ImageFolder` + `DataLoader` (train-only
+  augmentation: random flip/rotation), logs everything to MLflow, evaluates on the test
+  set, saves the model.
+- `src/data/transforms.py` holds the shared train/eval image transforms, reused later by
+  the inference API — avoids train/serve skew.
 
-## Git log so far
+### Experiment tracking
 
-```
-d4b5ba8 Add dataset license and readme from Kaggle source
-5256604 Track raw Cats vs Dogs dataset with DVC
-86108ba Initialize DVC with local storage remote
-```
-
-## M1 Task 2 design decisions (Model Building)
-
-- **CPU-only training** — no NVIDIA GPU available, so the baseline CNN is deliberately
-  shallow (3 conv+pool blocks + small FC head) rather than a deep architecture.
-- **Subsampling**: full 25,000-image raw dataset stays DVC-tracked as-is, but training
-  uses a balanced subsample of **4,000 images (2,000 cat + 2,000 dog)**, split 80/10/10
-  → 3,200 train / 400 val / 400 test. Chosen to keep CPU training time reasonable (an
-  engineering tradeoff, not a shortcut — documented here for the report).
-- **Preprocessing materializes real files**: resized 224x224 RGB JPEGs are written to
-  `data/processed/{train,val,test}/{cat,dog}/`, not just resized on-the-fly — this gives
-  a real artifact to `dvc add`, matching the assignment's "track pre-processed data"
-  wording.
-- **Augmentation** is applied on-the-fly during training (torchvision transforms: random
-  flip/rotation) on the train split only — not baked into the saved processed files. This
-  is standard practice (avoids inflating stored data, keeps val/test deterministic).
-- **Package installs** (run manually by user in `venv`, not via assistant-run commands —
-  see workflow note below):
-  ```
-  venv\Scripts\python.exe -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
-  venv\Scripts\python.exe -m pip install pillow scikit-learn matplotlib mlflow
-  ```
-
-## M1 Task 2 execution — preprocessing
-
-- Created `requirements.txt` with pinned versions for all key libraries (torch/torchvision
-  installed separately from the PyTorch CPU wheel index, since PyPI's default index only
-  hosts CUDA builds).
-- Wrote `src/data/preprocess.py`:
-  - `is_valid_image()` — filters corrupt/zero-byte files via Pillow open+verify.
-  - `list_valid_images()`, `split_paths()`, `save_resized()`, `process_class()` — pure,
-    independently testable helpers (used for M3 unit tests later).
-  - Run via `python -m src.data.preprocess` (not as a plain file path) so that
-    `src`/`src.data` resolve correctly as packages and the project root is on `sys.path` —
-    needed once other modules start importing from `src.data.*`.
-  - Added `src/__init__.py`, `src/data/__init__.py` to make them proper packages.
-- Ran it: scanned `data/raw/PetImages/{Cat,Dog}` (25,000 raw files), filtered corrupt
-  ones, subsampled 2,000 valid images per class (seed=42), split 80/10/10, resized to
-  224x224 RGB, wrote to `data/processed/{train,val,test}/{cat,dog}/`.
-- Verified output: 1,600/1,600 train, 200/200 val, 200/200 test (cat/dog), total 4,000
-  files; spot-checked a sample image is exactly `(224, 224)` in `RGB` mode.
-- DVC-tracked the result:
-  ```
-  dvc add data/processed
-  dvc push
-  ```
-  Pointer file `data/processed.dvc` records 4,000 files, ~37.6MB.
-- Committed code + processed-data pointer to git (commit `d3d370a`,
-  "Add preprocessing script; DVC-track processed dataset").
-
-## M1 Task 2 execution — baseline model + training script
-
-- Wrote `src/models/model.py` — `SimpleCNN`: 3 conv+ReLU+maxpool blocks (3→32→64→128
-  channels), `AdaptiveAvgPool2d((7,7))` to keep the flattened feature size small
-  regardless of input resolution, then a small FC head (6272→128→1) outputting a single
-  logit for `BCEWithLogitsLoss`. Deliberately shallow given CPU-only training.
-- Wrote `src/models/train.py`:
-  - `build_dataloaders()` — `torchvision.datasets.ImageFolder` over
-    `data/processed/{train,val,test}`; class-to-index mapping is alphabetical, so
-    `cat=0`, `dog=1`. Train loader gets `RandomHorizontalFlip` + `RandomRotation(15)`
-    augmentation; val/test loaders use a plain (no-augmentation) transform, both use
-    ImageNet mean/std normalization.
-  - `run_epoch()` — shared train/eval step (acts as trainer when given an optimizer,
-    evaluator otherwise), returns avg loss + accuracy.
-  - Trains for `--epochs` (default 10), logging train/val loss & accuracy to MLflow every
-    epoch; evaluates on the test set at the end (accuracy, precision, recall, F1,
-    confusion matrix via scikit-learn).
-  - Saves a loss-curve plot and confusion-matrix plot under `outputs/`, logs both as
-    MLflow artifacts (satisfies M1 Task 3's "confusion matrix, loss curves" requirement).
-  - Saves the trained model to `models/cnn_baseline.pt` (`torch.save(state_dict)`), also
-    logs it via `mlflow.pytorch.log_model` for the run's model artifact/registry entry.
-  - Writes `models/model_metadata.json` (run ID + test metrics) for later use when
-    packaging the model for serving in M2.
-  - MLflow experiment name: `cats-vs-dogs-classification` (mirrors Assignment 1's
-    `heart-disease-classification` naming convention). Local file-based tracking
-    (`./mlruns`, gitignored), viewable via `mlflow ui --backend-store-uri ./mlruns`.
-  - Run via `python -m src.models.train` for the same package-resolution reason as
-    preprocessing.
-- **Bug hit on first run**: `mlflow.pytorch.log_model(model, "model")` failed after all
-  10 epochs completed — this MLflow version (3.15.1) defaults to PyTorch's `pt2`
-  (torch.export trace-based) serialization format, which requires an example input
-  tensor to trace the model graph. Training itself, the loss/confusion-matrix plots, and
-  `models/cnn_baseline.pt` had already been saved/logged successfully before this failed
-  step; only the MLflow "logged model" entry and `model_metadata.json` were missed on
-  that run (recorded as a `FAILED` run in `mlruns/`, harmless, left as-is).
-  Fix: pass `input_example=example_input[:1].numpy()` (one sample from the test loader)
-  to `log_model`, and switched to the `name=` kwarg (`artifact_path` is deprecated in
-  this version).
-- **Re-ran successfully.** Results (run `9a622c5b19bb4e8dab8280c7fb374abf`, MLflow
-  experiment id `1`):
+- MLflow experiment `cats-vs-dogs-classification`. Each run logs params (architecture,
+  epochs, batch size, lr), per-epoch metrics (train/val loss & accuracy), final test
+  metrics, a confusion-matrix plot, a loss-curve plot, the model (via
+  `mlflow.pytorch.log_model`, with an `input_example` — this MLflow version needs one to
+  trace the model graph), and `models/model_metadata.json`.
+- **Result** (run `9a622c5b19bb4e8dab8280c7fb374abf`):
 
   | Metric | Value |
   |---|---|
@@ -192,501 +67,210 @@ d4b5ba8 Add dataset license and readme from Kaggle source
   | Test recall | 0.7750 |
   | Test F1 | 0.7654 |
 
-  Loss curve shows normal train/val convergence with mild overfitting starting around
-  epoch 6-7 (train loss keeps dropping to ~0.44 while val plateaus ~0.49) — expected and
-  acceptable for a shallow baseline on a 3,200-image training set. Confusion matrix is
-  reasonably balanced (150/50 cat, 45/155 dog — no severe class bias).
-- Model versioning decision: `models/cnn_baseline.pt` (3.5MB) and
-  `models/model_metadata.json` are committed **directly to git**, not DVC — small enough
-  that git handles it fine, and keeps the model directly visible/downloadable in the repo
-  for M2 packaging (Docker can `COPY` it directly) without a `dvc pull` step.
-- `mlruns/` (MLflow's local tracking store) stays gitignored — not meant for git (grows
-  every run, best viewed via `mlflow ui --backend-store-uri ./mlruns`), but will be
-  included in the final zip deliverable so a grader can browse run history without
-  retraining.
+  Loss curve shows normal train/val convergence with mild overfitting from epoch ~6-7 —
+  expected for a shallow baseline on 3,200 training images. Confusion matrix is
+  reasonably balanced (150/50 cat, 45/155 dog).
+- `models/cnn_baseline.pt` and `model_metadata.json` are committed **directly to git**
+  (not DVC) — small enough (3.5MB) that git handles it fine, and keeps the model
+  directly available for Docker/CI without a `dvc pull` step.
 
-## MLflow UI — filestore "maintenance mode" + split storage (troubleshooting notes)
+**Troubleshooting — MLflow UI shows an empty experiment.** `mlflow ui
+--backend-store-uri ./mlruns` initially refused to start at all (MLflow's file-store
+backend is in "maintenance mode" in this version; worked around with
+`MLFLOW_ALLOW_FILE_STORE=true`), and once it started, showed zero runs despite training
+having clearly succeeded. Root cause: `train.py` never sets an explicit tracking URI, and
+this MLflow version's implicit default silently *splits* storage — tracking metadata
+(runs/params/metrics) goes to an auto-created SQLite file, `mlflow.db`, while artifacts
+still go to `./mlruns/.../artifacts/`. Pointing the UI at `./mlruns` only ever found the
+artifacts, not the metadata. **Fix**: view experiments via
+`mlflow ui --backend-store-uri sqlite:///mlflow.db` instead — confirmed via a direct
+`sqlite3` query and then the UI showing all runs, params, metrics, and artifacts
+correctly.
 
-**First symptom**: `mlflow ui --backend-store-uri ./mlruns` failed outright:
-```
-MlflowException: The filesystem tracking backend (e.g., './mlruns') is in maintenance
-mode and will not receive further updates. ... set MLFLOW_ALLOW_FILE_STORE=true to opt
-out of this exception.
-```
-Worked around with `$env:MLFLOW_ALLOW_FILE_STORE="true"` — the UI then started, but the
-experiment showed as **empty** (no runs), even though training had clearly succeeded.
+---
 
-**Real root cause**: `train.py` never explicitly sets `mlflow.set_tracking_uri(...)`.
-MLflow 3.x's implicit defaults turned out to be *split*: tracking metadata (experiments,
-runs, params, metrics) went to a local SQLite file, **`mlflow.db`**, auto-created in the
-project root — while artifacts (`log_artifact`/`log_model` files) still went to
-`./mlruns/<experiment_id>/<run_id>/artifacts/` as before. Pointing the UI at `./mlruns`
-only searches that folder for run metadata (`meta.yaml`, `params/`, `metrics/`), finds
-none there (confirmed: those run folders contained only an `artifacts/` subfolder), and
-reports empty — despite the artifact files genuinely being present.
+## M2 — Model Packaging & Containerization
 
-**Fix**: point the UI at the SQLite store instead, which is where the real metadata is
-(confirmed via a direct `sqlite3` query showing the `cats-vs-dogs-classification`
-experiment and all 3 runs, including the successful `FINISHED` one):
-```
-venv\Scripts\python.exe -m mlflow ui --backend-store-uri sqlite:///mlflow.db
-```
-No `MLFLOW_ALLOW_FILE_STORE` needed for this path — SQLite is the backend MLflow
-actually wants. `mlflow.db` is gitignored (regenerated locally by re-running training;
-not meant for git). **This is now the canonical command to view experiments for this
-project.**
+### Inference service
 
-**Verified in the UI**: run `puzzled-colt-687` (`9a622c5b19bb4e8dab8280c7fb374abf`) shows
-correct Parameters (architecture, epochs, batch_size, lr, split sizes), Metrics
-(per-epoch train/val loss & accuracy, final test accuracy/precision/recall/F1), and
-Artifacts (`confusion_matrix.png`, `loss_curve.png`, `cnn_baseline.pt`,
-`model_metadata.json`, and a `model/` folder with the MLflow-logged model — MLmodel
-manifest, conda/python env specs, input examples). **M1 confirmed fully complete.**
-
-## M1 — complete
-
-All three M1 tasks (Data & Code Versioning, Model Building, Experiment Tracking) are
-done and verified: git + DVC versioning in place, baseline CNN trained (76.25% test
-accuracy) and saved, MLflow tracking confirmed working end-to-end in the UI.
-
-## Next up (not yet done)
-
-- M2: Inference Service — FastAPI wrapper around `cnn_baseline.pt` with `/health` and
-  `/predict` endpoints, then Dockerfile + local build/run verification.
-
-## M2 Task 1 — Inference Service (FastAPI)
-
-- Refactored transforms into `src/data/transforms.py` (`get_train_transform()`,
-  `get_eval_transform()`, shared `CLASS_NAMES = ["cat", "dog"]`) so training and
-  inference use identical preprocessing — avoids train/serve skew. `get_eval_transform()`
-  adds a `Resize(224, 224)` step (a no-op on already-224x224 processed files, but
-  necessary for arbitrary-sized images arriving via the API). `train.py` updated to
-  import from here instead of defining transforms inline.
-- `src/api/inference.py` — `load_model(path)` and `predict(model, image) -> dict`, kept
-  separate from the FastAPI layer so they're unit-testable without a running server
-  (target for M3's "model utility/inference function" test).
-- `src/api/main.py` — FastAPI app, model loaded once at startup via a `lifespan` context
-  manager (not per-request):
+- `src/api/inference.py`: `load_model()` and `predict()`, kept separate from the FastAPI
+  layer so they're independently unit-testable.
+- `src/api/main.py`: FastAPI app, model loaded once at startup (`lifespan` context
+  manager, not per-request).
   - `GET /health` → `{"status": "healthy"}`
-  - `POST /predict` → multipart file upload (`UploadFile`), validates content-type and
-    that the bytes decode as an image, returns `{label, probability, class_probabilities}`
-  - `MODEL_PATH` overridable via env var, defaults to `models/cnn_baseline.pt`
-  - Request/response logging and metrics deliberately deferred to M5 (Monitoring), to
-    keep M2 scoped to the two required endpoints + packaging.
-- Added `python-multipart` to `requirements.txt` (required by FastAPI for file uploads).
-- Created `docker/requirements.txt` — leaner, inference-only dependency list (numpy,
-  pillow, fastapi, uvicorn, pydantic, python-multipart; torch/torchvision installed
-  separately from the CPU wheel index). Excludes dvc/mlflow/matplotlib/scikit-learn/pytest
-  to keep the eventual container image smaller.
-- **Verified locally**: ran `uvicorn src.api.main:app --reload --port 8000`, tested both
-  endpoints with `curl`.
-  - `/health` returned `{"status": "healthy"}`.
-  - `/predict` on `data/processed/test/cat/cat_00000.jpg` returned `label: "dog"`
-    (dog_prob=0.6448) — initially looked like a bug, but cross-checked against the exact
-    same evaluation pipeline `train.py` used to measure 76.25% test accuracy (loading the
-    same image via `ImageFolder` + `get_eval_transform()`) and got the **identical**
-    dog_prob=0.6448. Confirms the API reproduces the model's real behavior with no
-    train/serve skew — this image is simply one of the ~50/200 test cats the baseline
-    model gets wrong, consistent with the known confusion matrix. Not a bug.
-  - `/predict` on other test images (dogs, other cats) returned correct labels with
-    reasonable confidence.
+  - `POST /predict` → multipart file upload, validates it's an image, returns
+    `{label, probability, class_probabilities}`
 
-## M2 Task 3 — Containerization
+### Environment specification
 
-- Created `.dockerignore` (excludes `venv/`, `data/` [826MB], `mlruns/`, `.git/`, `.dvc/`,
-  `notebooks/`, `outputs/`, `tests/`) — without it, `docker build`'s build context would
-  include the entire raw dataset and venv, extremely slow to send to the daemon.
-- `docker/Dockerfile`: `python:3.11-slim` base, installs CPU torch/torchvision from the
-  PyTorch wheel index as its own layer *before* copying app code (so code changes don't
-  invalidate the large PyTorch download layer on rebuild), then `docker/requirements.txt`,
-  then copies only `src/` and `models/cnn_baseline.pt` (not training data or scripts'
-  other dependencies). `HEALTHCHECK` polls `/health` every 30s. Runs via
-  `uvicorn src.api.main:app --host 0.0.0.0 --port 8000`.
-- **Troubleshooting**: first build attempt failed —
-  `failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine` —
-  because Docker Desktop wasn't running (the CLI was installed, but its background engine
-  needs the Docker Desktop application launched). Started Docker Desktop, waited for
-  "Engine running," confirmed via `docker info`, then proceeded.
-- **Built and verified successfully**:
-  ```
-  docker build -f docker\Dockerfile -t cats-dogs-api:latest .
-  docker run -d --name cats-dogs-api -p 8000:8000 cats-dogs-api:latest
-  ```
-  Image: `cats-dogs-api:latest`, 327MB content size. Container status confirmed
-  `Up ... (healthy)` — i.e. the Dockerfile's `HEALTHCHECK` itself is passing, not just
-  that the process started. `curl http://localhost:8000/health` →
-  `{"status":"healthy"}`. `curl -X POST -F "file=@..." http://localhost:8000/predict` on
-  a dog test image → correctly returned `label: "dog"` with 66% confidence.
+- `requirements.txt` — full dev/training dependencies, pinned versions (torch/torchvision
+  installed separately from the PyTorch CPU wheel index, since PyPI only hosts CUDA
+  builds).
+- `docker/requirements.txt` — a leaner, inference-only subset (numpy, pillow, fastapi,
+  uvicorn, pydantic, python-multipart, prometheus-client), excluding dvc/mlflow/
+  matplotlib/scikit-learn/pytest to keep the container image smaller.
 
-## M2 — complete
+### Containerization
 
-All three M2 tasks done and verified: FastAPI inference service with `/health` +
-`/predict`, pinned dependencies (root `requirements.txt` for dev/training, leaner
-`docker/requirements.txt` for the inference image), Dockerfile built and run locally with
-predictions verified via curl against the actual running container.
+- `docker/Dockerfile`: `python:3.11-slim`, installs CPU torch/torchvision as its own
+  layer before copying app code (so code changes don't invalidate that large layer on
+  rebuild), copies only `src/` and `models/cnn_baseline.pt`. `HEALTHCHECK` polls
+  `/health` every 30s.
+- `.dockerignore` excludes `venv/`, `data/` (826MB), `mlruns/`, `.git/`, `.dvc/`,
+  `notebooks/`, `outputs/`, `tests/` — otherwise the build context would include the
+  entire raw dataset.
+- **Verified**: built, ran locally (`docker run -p 8000:8000`), container reported
+  `Up ... (healthy)`, `/health` and `/predict` both confirmed correct via curl.
 
-## M3 Task 1 — Automated Testing
+---
 
-- `tests/test_preprocess.py` (8 tests) — `is_valid_image()` against real/corrupt/empty/
-  missing files (using `tmp_path` fixtures, not the real dataset); `split_paths()` for
-  correct ratios, no overlap between splits, full coverage, determinism given a seed.
-- `tests/test_inference.py` (4 tests) — `predict()` against synthetic PIL images (not
-  real cat/dog photos, so tests don't depend on the dataset): output structure/keys,
-  probabilities sum to 1, handles non-square/non-224 images and grayscale input. Skips
-  gracefully if `models/cnn_baseline.pt` isn't present rather than failing.
-- All 12 tests pass via `python -m pytest tests/ -v`.
+## M3 — CI Pipeline for Build, Test & Image Creation
 
-## GitHub repository
+### Automated testing
 
-- Remote: `https://github.com/MadihaFathima/bits_mlops_assignment_2.git`
-- Renamed local branch `master` → `main` to match GitHub Actions / Assignment 1
-  convention. Pushed all commits through M3 Task 1.
+- `tests/test_preprocess.py` (8 tests) — `is_valid_image()` and `split_paths()`, using
+  `tmp_path` fixtures rather than the real dataset.
+- `tests/test_inference.py` (4 tests) — `predict()` against synthetic PIL images (no
+  dependency on real cat/dog photos): output structure, probabilities sum to 1, handles
+  non-square/non-224 images and grayscale input.
+- All 12 pass via `python -m pytest tests/ -v`.
 
-## M3 Task 2/3 — CI Pipeline (GitHub Actions) + Registry
+### CI setup & artifact publishing
 
-- `.github/workflows/ci.yml`, triggered on push/PR to `main`. Two jobs:
-  - **`test`**: checkout → Python 3.11 → install CPU torch/torchvision + `requirements.txt`
-    → `pytest tests/ -v`.
-  - **`build-and-push`** (`needs: test`, only runs if tests pass): checkout → `docker
-    build` → **smoke-test the image locally first** (run container, poll `/health` up to
-    15x with 2s delay, fail the job with container logs if it never comes up healthy) →
-    only then log in to GHCR and push. A broken image never gets published — same
-    "test before publish" pattern as Assignment 1's `docker-build-smoke-test` job.
-  - Registry: **GitHub Container Registry** (`ghcr.io/madihafathima/bits_mlops_assignment_2`).
-    Auth via the automatically-provided `GITHUB_TOKEN` (job-level
-    `permissions: packages: write`) — no manually-configured secrets needed, unlike
-    Docker Hub.
-- **Key design decision**: CI does *not* run `dvc pull` or retrain the model. Our DVC
-  remote is a local Windows folder (`D:\Bits-SEM3\dvc-storage\...`), unreachable from
-  GitHub's cloud runners. This isn't a gap: `models/cnn_baseline.pt` is committed
-  directly to git (per the M1 decision), so `actions/checkout` alone gives CI everything
-  it needs — tests use synthetic images, not the real dataset, and the Docker build only
-  needs `src/` + the committed model file. Training/data-versioning stays a local
-  (DVC-tracked) concern; CI's job is build/test/package/publish.
+`.github/workflows/ci.yml`, on push/PR to `main`:
+- **`test`**: checkout → Python 3.11 → install deps → `python -m pytest`.
+- **`build-and-push`** (needs `test`): builds the Docker image, **smoke-tests it locally
+  first** (runs the container, polls `/health`, fails with container logs if it never
+  comes up healthy), only then logs in to and pushes to **GitHub Container Registry**
+  (`ghcr.io/madihafathima/bits_mlops_assignment_2`) using the automatically-provided
+  `GITHUB_TOKEN` — no manually-configured secrets needed.
 
-**Troubleshooting**: first CI run failed both test collection with
-`ModuleNotFoundError: No module named 'src'`. Cause: the workflow's test step ran the
-bare `pytest tests/ -v` command, not `python -m pytest`. As established earlier in this
-project (see the M1 preprocessing notes), only `-m pytest` adds the project root to
-`sys.path`, which `from src.data.preprocess import ...`-style absolute imports need —
-running `pytest` directly instead only adds the test file's own directory. Same class of
-bug as the earlier "why `-m src.data.preprocess` and not the file path" question, just
-hitting `pytest` this time instead of a training/preprocessing script. Fixed by changing
-the workflow step to `python -m pytest tests/ -v`.
+**Design note**: CI does not `dvc pull` or retrain — the DVC remote is a local Windows
+folder, unreachable from GitHub's cloud runners. This isn't a gap: the trained model is
+committed directly to git, so `actions/checkout` alone gives CI everything it needs.
+Training/data-versioning stays a local concern; CI's job is build/test/package/publish.
 
-Confirmed working after the fix: both `test` and `build-and-push` jobs pass on GitHub
-Actions.
+**Troubleshooting**: first CI run failed test collection with `ModuleNotFoundError: No
+module named 'src'`. Cause: the workflow ran bare `pytest`, not `python -m pytest` — only
+the latter adds the project root to `sys.path`, which the `from src...` absolute imports
+need. Fixed by using `python -m pytest` in the workflow.
 
-## M3 — complete
+---
 
-All three M3 tasks done: 12 pytest unit tests (preprocessing + inference), CI pipeline on
-GitHub Actions (checkout → install → test → build → smoke-test → push), image published
-to GHCR automatically on every push to `main`.
+## M4 — CD Pipeline & Deployment
 
-## M4 Task 1 — Deployment Target & Manifests
+### Deployment target & manifests
 
-- **Architectural constraint identified up front**: the deployment target is Docker
-  Desktop's *local* Kubernetes cluster on this Windows machine. GitHub Actions' standard
-  cloud runners are ephemeral VMs with no network path to a local cluster — a normal
-  workflow job cannot run `kubectl apply` against it. Resolved by deciding to register
-  this machine as a **self-hosted GitHub Actions runner** (see below), rather than
-  settling for a manual/documented deploy script — chosen because it gives a genuinely
-  automatic push-to-deploy flow, which matters both for meeting the assignment's
-  "automatically on main branch changes" wording and for a much better demo video.
-- GHCR package visibility set to **Public** (via package settings → Danger Zone → Change
-  visibility) — avoids needing to manage an `imagePullSecret`/PAT for the cluster to pull
-  the image; acceptable since the image contains no sensitive data (model weights +
-  inference code only).
-- `k8s/deployment.yaml`: 2 replicas, resource requests/limits (250m/500m CPU,
-  256Mi/512Mi memory), `imagePullPolicy: Always` (so redeploys actually re-pull rather
-  than reuse a stale cached `:latest`).
-- `k8s/service.yaml`: `LoadBalancer` type, originally `port: 80`.
-- Confirmed Docker Desktop's Kubernetes was running (`kubectl cluster-info` reachable at
-  `docker-desktop` context) before deploying.
+- Target: **Docker Desktop's built-in Kubernetes** cluster on this machine.
+- `k8s/deployment.yaml`: 2 replicas, resource requests/limits, `imagePullPolicy: Always`.
+- `k8s/service.yaml`: `LoadBalancer`, port **8080** (see troubleshooting below for why
+  not 80).
+- GHCR package visibility set to **Public** so the cluster can pull the image without
+  managing an `imagePullSecret`/PAT.
 
-**Troubleshooting — pod startup/liveness crash loop**: first deploy attempt showed pods
-stuck `ContainerCreating` then `Running` but never `1/1` ready, eventually killed and
-restarted by the liveness probe (`kubectl describe pod` showed
-`Liveness probe failed: ... connection refused`, then `Killing ... will be restarted`).
-Root cause: the container takes longer than the liveness probe's ~50s tolerance
-(20s initial delay + 3×10s failures) to finish importing PyTorch and loading the model —
-made worse by the 500m CPU limit throttling that import. Kubernetes killed the container
-for being "unhealthy" before it had even finished starting, then repeated the cycle
-forever. Fixed properly (not just by loosening the existing probes) by adding a
-**`startupProbe`** (`periodSeconds: 5, failureThreshold: 30` → up to 150s grace before
-liveness/readiness probes even begin evaluating) — the K8s-native solution for
-slow-starting containers, since it doesn't permanently weaken liveness responsiveness
-once the app is actually up. Also added `PYTHONUNBUFFERED=1` to the Dockerfile — logs
-were showing up empty during debugging because Python buffers stdout by default when not
-attached to a TTY, which made this issue harder to diagnose than necessary.
+### CD / GitOps flow
 
-**Troubleshooting — service routing conflict**: after the startup fix, pods reached
-`1/1 Running`, but `curl http://localhost/health` returned `{"status":"ok"}` (not our
-app's actual `{"status":"healthy"}`) and `/predict` errored. Root cause: Assignment 1's
-`heart-disease-api-service` is still running on this same shared local cluster and is
-*also* a `LoadBalancer` on port 80 — `kubectl get svc -o wide` confirmed it already held
-the external IP, while `cats-dogs-api-service` sat at `EXTERNAL-IP: <pending>`, unable to
-bind host port 80. Fixed by changing our service to **port 8080** instead (not by
-touching/stopping the Assignment 1 service, which is prior graded work). Even after that
-edit, the service stayed `<pending>` — `kubectl apply` performed an in-place update, but
-Docker Desktop's lightweight LoadBalancer controller apparently only assigns an external
-IP at object *creation*, not on updates. Fixed by `kubectl delete -f k8s/service.yaml`
-then `kubectl apply -f k8s/service.yaml` (recreate from scratch), which got a real
-external IP (`172.18.0.6`) immediately. Verified via
-`curl http://localhost:8080/health` → `{"status":"healthy"}` and a correct `/predict`
-result against the real service.
+**Architectural constraint**: GitHub's standard cloud runners can't reach a local
+Kubernetes cluster. Solved by registering this machine as a **self-hosted GitHub Actions
+runner**, rather than settling for a manual deploy script — this gives a genuinely
+automatic push-to-deploy flow.
 
-## M4 Task 2 — Self-hosted runner + automated deploy job
+Added a `deploy` job to the same workflow: `needs: build-and-push`, `runs-on:
+self-hosted`, gated to `push` events on `main` only (never `pull_request` — a
+self-hosted runner shouldn't execute arbitrary PR-triggered code). It applies the
+manifests, then `kubectl set image` to the exact `:${{ github.sha }}` tag (guarantees a
+real rollout every time, avoiding the classic "K8s doesn't notice `:latest` changed"
+trap), waits for rollout completion, then runs a post-deploy smoke test (`/health` + a
+real `/predict` call using a fixture image committed to git).
 
-- Registered this Windows machine as a GitHub Actions self-hosted runner (repo Settings
-  → Actions → Runners → New self-hosted runner → downloaded/configured/ran per GitHub's
-  generated instructions). Attempted to install as a Windows service (needs admin
-  privileges); fell back to running interactively via `./run.cmd` in an open terminal
-  ("Listening for Jobs") — sufficient for now, though it only listens while that terminal
-  stays open. Revisit installing as a persistent service later if needed.
-- Added a `deploy` job to `.github/workflows/ci.yml`: `needs: build-and-push`,
-  `runs-on: self-hosted`, gated to `push` events on `main` only (not PRs — a self-hosted
-  runner shouldn't execute arbitrary PR-triggered code against local infra). Applies
-  `k8s/deployment.yaml`/`service.yaml`, then `kubectl set image` to the exact
-  `:${{ github.sha }}` tag (guarantees a real rollout every time, avoiding the classic
-  "K8s doesn't notice `:latest` changed" trap), `kubectl rollout status`, then a
-  post-deploy smoke test (`/health` + a real `/predict` call using a small fixture image
-  committed directly to git at `tests/fixtures/sample_dog.jpg`, since a workflow step
-  shouldn't depend on pulling DVC-tracked data) — **fails the job** if either check fails,
-  satisfying the assignment's explicit requirement.
+### Smoke test — verified to actually fail the pipeline
 
-**Troubleshooting — stale/uncommitted files caught by CI, not caught locally**:
-1. First run failed both jobs with `ModuleNotFoundError: No module named 'src'` in
-   `test` — same root cause as the earlier preprocessing `-m` question: the CI step ran
-   bare `pytest`, not `python -m pytest`. Fixed.
-2. Discovered mid-debugging that `k8s/service.yaml` had a **local uncommitted edit**
-   (still committed as `port: 80`, the version that caused the Assignment-1 port
-   conflict) — the live cluster had been fixed manually via `kubectl apply`/`delete`
-   earlier, but the *file* fix was never actually committed. This would have made the
-   `deploy` job re-introduce the exact port-80 conflict on every automated deploy. Caught
-   via `git status`/`git show HEAD:... ` comparison before it could bite; committed the
-   real fix.
-3. A workflow run appeared "not reflecting" on the Actions UI — turned out to be a
-   genuine (if confusing) sequence of a hung GitHub-hosted cleanup step
-   ("Post Run actions/checkout@v4" stuck `in_progress` for several minutes on the
-   `build-and-push` job, unrelated to this project's code — a rare cloud-runner
-   infrastructure hiccup) blocking the dependent `deploy` job from starting. Verified via
-   GitHub's REST API directly (`/actions/runs`, `/actions/runs/{id}/jobs`) rather than
-   trusting the browser UI, which helped distinguish "not triggered" from "triggered but
-   stuck."
-4. **Real bug, the interesting one**: once `deploy` finally ran, `kubectl apply` failed
-   with a raw Windows socket timeout (`Error code: Bash/Service/0x8007274c`) — but
-   `kubectl cluster-info` succeeded fine when run manually in both PowerShell and Git
-   Bash on the same machine immediately after. Root cause found by expanding the full
-   step log: the workflow's `shell: bash` default resolved to
-   **`C:\Windows\System32\bash.exe`** (the WSL launcher shim), not real Git Bash —
-   visible only in the step's `shell:` metadata line in the full log, not the collapsed
-   summary. WSL runs in its own isolated network namespace; `127.0.0.1:<port>` inside WSL
-   is not the Windows host's `127.0.0.1` that Docker Desktop's Kubernetes API server
-   binds to, so `kubectl` timed out trying to reach it from inside WSL bash. This
-   machine has three `bash.exe` on PATH (Git Bash, the WSL shim, and a WindowsApps
-   stub) — the WSL one apparently wins when only the bare name `bash` is given. **Fixed**
-   by pinning the `deploy` job's shell explicitly to
-   `C:\Program Files\Git\bin\bash.exe --noprofile --norc -e -o pipefail {0}` instead of
-   the ambiguous `shell: bash`.
+Ran a deliberate negative test: pointed the smoke test at a wrong port, pushed, and
+confirmed the real rollout succeeded fine (proving the smoke test failure is isolated)
+while the smoke test step itself correctly failed, which correctly failed the whole
+`deploy` job and workflow run — with the live service completely unaffected throughout.
+This is verified evidence, not just code that claims to, that the pipeline fails closed
+per the assignment's explicit requirement. Reverted immediately after confirming.
 
-5. Pinning bash to its full Git install path (`C:\Program Files\Git\bin\bash.exe`) hit a
-   *different*, unrelated bug: `Error: Second path fragment must not be a drive or UNC
-   name. (Parameter 'expression')` — a .NET exception from the GitHub Actions runner's
-   own internal code (it's a C# process), which doesn't cleanly handle an absolute
-   Windows path with spaces given as a custom `shell:` value. Rather than fight bash on
-   Windows further, **switched the `deploy` job to PowerShell** (`shell: powershell`) —
-   the native, unambiguous default shell on any Windows machine, sidestepping both the
-   WSL-shim ambiguity and this path-parsing bug entirely. Rewrote the steps accordingly:
-   used `${{ env.IMAGE_NAME }}:${{ github.sha }}` (a GitHub Actions expression, resolved
-   before the shell sees it) instead of shell-level env var interpolation, since
-   PowerShell treats `$Name:` as drive-qualified variable syntax; used `curl.exe`
-   explicitly since PowerShell aliases bare `curl` to `Invoke-WebRequest` (different
-   behavior entirely); added explicit `$LASTEXITCODE` checks after each `kubectl`/
-   `curl.exe` call, since PowerShell — unlike bash — doesn't auto-fail a script when a
-   native command returns non-zero.
-6. PowerShell attempt then failed with
-   `File ...\_temp\....ps1 cannot be loaded because running scripts is disabled on this
-   system` (`PSSecurityException: UnauthorizedAccess`) — a stock Windows PowerShell
-   execution-policy restriction (`Restricted` by default), which blocks running *any*
-   `.ps1` file, including ones legitimately generated by the Actions runner itself for
-   each step. Fixed with `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope
-   CurrentUser` (no admin rights needed) — `RemoteSigned` is the standard safe middle
-   ground: local/self-generated scripts run freely, downloaded scripts still need a
-   trusted signature. Verified via `Get-ExecutionPolicy -List` that `CurrentUser` scope
-   now shows `RemoteSigned`.
-7. Next attempt failed differently:
-   `The actions actions/checkout@v4, actions/setup-python@v5, and docker/login-action@v3
-   are not allowed in MadihaFathima/bits_mlops_assignment_2 because all actions must be
-   from a repository owned by MadihaFathima`. While reviewing the self-hosted-runner
-   security settings (see below), the repo's Actions permissions had been set to "Allow
-   MadihaFathima actions and reusable workflows" — the most restrictive option, which
-   blocks literally any action not published under the repo owner's own account,
-   including GitHub's and Docker's own official actions. Fixed by switching to "Allow
-   MadihaFathima, and select non-MadihaFathima, actions and reusable workflows" and
-   explicitly whitelisting `actions/checkout@*`, `actions/setup-python@*`,
-   `docker/login-action@*` — permits exactly what's needed without opening the door to
-   arbitrary third-party actions (relevant given the self-hosted runner's exposure).
-8. With execution policy and action permissions both fixed, `kubectl apply`/
-   `kubectl set image` finally succeeded and the rollout genuinely started (`image
-   updated`, replicas progressing) — but `kubectl rollout status --timeout=300s` still
-   timed out waiting on the last old replica to terminate. Consistent with the earlier
-   manual test: a full 2-replica rolling update, each pod needing up to 150s for the
-   `startupProbe` grace period plus Kubernetes' default one-at-a-time replacement
-   behavior, genuinely takes longer than 5 minutes end-to-end. Increased to
-   `--timeout=600s`.
+### Troubleshooting notes
 
-## Self-hosted runner security review
+- **Pod startup/liveness crash loop**: pods got stuck `ContainerCreating` → briefly
+  `Running` → killed and restarted, forever. Root cause: the container takes longer than
+  the liveness probe's default tolerance to finish importing PyTorch and loading the
+  model (worse under the CPU resource limit), so Kubernetes killed it for being
+  "unhealthy" before it had even finished starting. **Fix**: added a `startupProbe`
+  (up to 150s grace before liveness/readiness probes even begin evaluating) — the
+  K8s-native solution for slow-starting containers. Also added `PYTHONUNBUFFERED=1` to
+  the Dockerfile (logs were showing up empty during debugging, since Python buffers
+  stdout by default when not attached to a TTY).
+- **Service routing conflict**: after the startup fix, `curl http://localhost/health`
+  returned a *different* app's response entirely. Root cause: Assignment 1's
+  `heart-disease-api-service` is still running on this same shared local cluster and
+  already occupied host port 80 as a `LoadBalancer`. **Fix**: moved this project's
+  service to port 8080 instead of touching prior work. A related quirk: after editing the
+  port, the service stayed `EXTERNAL-IP: <pending>` until deleted and recreated —
+  Docker Desktop's LoadBalancer controller apparently only assigns an external IP at
+  object *creation*, not on in-place updates.
+- **Self-hosted Windows runner shell issues** (several compounding, in order hit):
+  a bare `shell: bash` resolved to the WSL bash shim (`C:\Windows\System32\bash.exe`)
+  rather than Git Bash, and WSL's isolated network namespace made `127.0.0.1` inside it
+  not the same as the Windows host's loopback — causing `kubectl` connection timeouts.
+  Pinning bash to its full Git install path then hit an unrelated GitHub Actions runner
+  bug parsing absolute Windows paths with spaces in a custom `shell:` value. **Fixed by
+  switching to PowerShell** (the unambiguous native shell on Windows) instead of fighting
+  bash further — which then surfaced two more environment issues to fix: PowerShell's
+  default execution policy blocking the runner's generated `.ps1` step scripts (fixed
+  with `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`), and the
+  repo's Actions permissions being set to the most restrictive option ("Allow
+  MadihaFathima actions only"), which blocked even GitHub's own official actions (fixed
+  by whitelisting `actions/checkout@*`, `actions/setup-python@*`, `docker/login-action@*`
+  explicitly). Finally, `kubectl rollout status` needed a longer timeout (600s) than the
+  default 300s, since a full 2-replica rolling update with the slow-startup grace period
+  genuinely takes several minutes.
 
-While setting this up, reviewed GitHub's self-hosted-runner security warning (public
-repos + self-hosted runners = risk of a malicious fork PR running code on this machine).
-Findings: the `deploy` job is already gated to `push` events on `main` only (never
-`pull_request`), so PR-triggered workflows never reach the self-hosted runner regardless.
-Confirmed repo settings already had the strongest available mitigation — "Require
-approval for all external contributors" under Actions → General → fork PR workflow
-approval — so no PR from an outside contributor runs anything at all without a manual
-approval click first. Considered making the repo private instead but kept it public
-(zip file remains the primary grading deliverable either way; current settings already
-minimize real exposure).
+### Self-hosted runner security
 
-**Confirmed working end-to-end** after the timeout fix: all three jobs (`test`,
-`build-and-push`, `deploy`) passed. Verified the live cluster directly: 2/2 pods
-`Running`, `curl http://localhost:8080/health` → `{"status":"healthy"}`, and a real
-`/predict` call correctly classified a cat test image (88.9% confidence).
+Reviewed GitHub's self-hosted-runner warning for public repos (risk: a malicious fork PR
+running code on this machine). The `deploy` job is gated to `push` events on `main` only,
+never `pull_request`, so PR-triggered workflows never reach the self-hosted runner
+regardless of what a PR's diff contains. Confirmed the repo already has the strongest
+available mitigation enabled — "Require approval for all external contributors" for fork
+PR workflows — so no outside PR runs anything without a manual approval click first.
 
-## M4 — complete
+---
 
-All three M4 tasks done and verified live: Kubernetes Deployment + Service manifests for
-Docker Desktop's built-in cluster, a genuinely automatic CD flow (self-hosted GitHub
-Actions runner picks up every push to `main`, rolls out the newly-built image, and runs a
-post-deploy smoke test that fails the pipeline on a bad deploy) — the full loop from code
-change to a live, correctly-predicting deployed service, unattended.
+## M5 — Monitoring, Logs & Final Submission
 
-## M5 Task 1 — in progress: Logging & Metrics
+### Basic monitoring & logging
 
-**Code written (not yet committed/pushed):**
-- `src/api/main.py` updated with:
-  - `@app.middleware("http")` (`log_and_measure_requests`) — logs method/path/status/
-    latency_ms via Python `logging` for every request (metadata only, never request/
-    response bodies — satisfies "excluding sensitive data").
-  - Prometheus metrics via `prometheus_client`: `api_requests_total` (Counter, labels
-    method/path/status), `api_request_latency_seconds` (Histogram, label path),
-    `predictions_total` (Counter, label=predicted label, incremented in `/predict`).
-  - New `GET /metrics` endpoint returning `generate_latest()`.
-- Added `prometheus-client==0.26.0` to both `requirements.txt` and
-  `docker/requirements.txt`.
-- Created `monitoring/prometheus.yml` — scrape config targeting
-  `host.docker.internal:8080` (Docker Desktop's DNS name for reaching the host from a
-  container; that's where the K8s-deployed service is exposed per `k8s/service.yaml`).
-- **None of this is committed or pushed yet.**
+- `src/api/main.py` gained a middleware (`log_and_measure_requests`) logging method,
+  path, status code, and latency for every request via Python's `logging` module —
+  metadata only, never request/response bodies (excludes sensitive data).
+- Prometheus metrics exposed at `GET /metrics` via `prometheus_client`:
+  `api_requests_total` (by method/path/status), `api_request_latency_seconds`
+  (histogram, by path), `predictions_total` (by predicted label).
+- `monitoring/prometheus.yml` scrapes the deployed service at
+  `host.docker.internal:8080`. Verified with a standalone Prometheus container — target
+  shows `UP` at `http://localhost:9090/targets`.
 
-**Currently debugging — unresolved when session paused for a laptop restart:**
-`GET /metrics` returns `404 Not Found` against the locally-run
-`uvicorn src.api.main:app --reload --port 8000`, even after:
-- Confirming `pip install prometheus-client==0.26.0` succeeded with no import errors on
-  a clean uvicorn restart (startup log showed "Application startup complete", no
-  exceptions).
-- Confirming `/health` still returns 200 correctly from the same running process.
-- Reading `src/api/main.py` directly off disk and confirming the `/metrics` route *is*
-  present in the source file exactly as intended.
-- **Smoking gun**: `curl http://localhost:8000/openapi.json` shows the running app's
-  actual registered routes are only `['/health', '/predict']` — `/metrics` is missing
-  from the live app's route table entirely, despite being in the source file on disk.
-  This means the running process is not actually executing the current `main.py` content
-  — classic symptom of either (a) a stale/orphaned uvicorn process still bound to port
-  8000 from an earlier session (Ctrl+C may not have fully killed a child "server
-  process" spawped by the `--reload` reloader), or (b) a stale compiled `.pyc` /
-  `__pycache__` artifact being imported instead of the current source, or (c) some other
-  process on this machine already holding port 8000.
-**Resolved after laptop restart** (as suspected): the reboot cleared whatever stale
-process/state was holding port 8000. Fresh `uvicorn --reload` run afterward showed all
-three routes correctly (`['/health', '/metrics', '/predict']`), and `/metrics` returned
-proper Prometheus-format output, confirmed populated correctly after a real request:
-`api_requests_total{method="POST",path="/predict",status="200"} 1.0`,
-`api_request_latency_seconds` histogram buckets per path, and
-`predictions_total{label="dog"} 1.0`. **M5 Task 1 logging/metrics code verified working
-locally.**
+### Model performance tracking (post-deployment)
 
-Pushed (commit `f84ca1b`), CI running: `test` passed, `build-and-push`/`deploy` in
-progress at time of writing.
+- `scripts/post_deploy_eval.py`: sends a small batch of **real HTTP requests** (test
+  images with known true labels) to the live deployed `/predict` endpoint, compares
+  predictions against ground truth, reports accuracy, writes a full report to
+  `outputs/post_deploy_eval.json`. Verified working against the live service.
 
-## M5 Task 2 — Post-deployment performance tracking
+**Troubleshooting**: `/metrics` returned 404 against a locally-running dev server despite
+the route clearly existing in the source and no import errors on startup — the app's own
+`/openapi.json` confirmed the running process's route table didn't match the file on
+disk (a stale/orphaned process holding the port). Resolved by a full machine restart, not
+pursued further since it was purely a local dev-server hygiene issue, not a code bug —
+confirmed by full success on the actually-deployed K8s service throughout.
 
-- `scripts/post_deploy_eval.py`: samples a small balanced batch (default 15/class) from
-  `data/processed/test/{cat,dog}` with a fixed seed, sends each image as a **real HTTP
-  request** to the *actually deployed* service's `/predict` endpoint (default
-  `http://localhost:8080`), compares each prediction against the known true label from
-  the folder it came from, and reports overall accuracy. Writes a full per-sample report
-  (file, true label, predicted label, probability, correct/incorrect) to
-  `outputs/post_deploy_eval.json`. Directly satisfies the assignment's "collect a small
-  batch of real or simulated requests and true labels" wording — these are real requests
-  against the live deployed model, with genuine ground-truth labels, not synthetic data.
-- Added `requests==2.34.2` to `requirements.txt` (was already present transitively via
-  other deps, but now a direct import).
-- **Verified working**: ran against the (at-the-time still old-image) live deployment,
-  10 samples → 70% accuracy, consistent with the model's known ~76% overall test
-  accuracy given the small sample size.
+---
 
-**Confirmed working end-to-end**: CI run for commit `f84ca1b` completed successfully
-(`test` → `build-and-push` → `deploy` all green), watched the live rollout directly via
-`kubectl get pods` (old pods replaced one at a time, both new pods reached `1/1 Running`),
-confirmed `/health` and `/metrics` both live on the real deployed service at
-`localhost:8080`.
+## Status
 
-**Prometheus container name conflict**: `docker run --name prometheus ...` failed —
-`docker inspect prometheus` revealed an *exited* container left over from Assignment 1
-(mounted to `D:/Bits-SEM3/Assignment/monitoring/prometheus.yml`, created back in July).
-Consistent with how the K8s port-80 conflict was handled earlier, didn't touch/remove the
-old container — just used a different name, `prometheus-cats-dogs`, for this project's
-instance:
-```
-docker run -d --name prometheus-cats-dogs -p 9090:9090 -v "d:\Bits-SEM3\mlops_assignment_2\monitoring\prometheus.yml:/etc/prometheus/prometheus.yml" prom/prometheus
-```
-**Verified**: `cats-dogs-api` target shows `UP` at `http://localhost:9090/targets`.
-
-**Clarified what needs to keep running vs. what was just a dev aid**: the K8s-deployed
-pods (port 8080) are the real, continuously-running deployment — that's what the CI/CD
-pipeline manages and what the demo video should show. The local `uvicorn --reload`
-instance (port 8000) was only ever a coding convenience for iterating on `main.py`
-without a full rebuild/redeploy cycle each time — not part of the deployed system, safe
-to stop. Prometheus is a separate external monitor scraping the always-live `/metrics`
-endpoint — not required to run continuously for the assignment's actual requirement (the
-endpoint itself satisfies that), but useful to keep up until report/demo screenshots are
-captured; trivially restartable later with the same command.
-
-## M5 — complete
-
-Both M5 tasks done and verified live: request/response logging (method/path/status/
-latency, no sensitive data) and Prometheus metrics (`api_requests_total`,
-`api_request_latency_seconds`, `predictions_total`) exposed at `/metrics` on the actual
-K8s-deployed service, confirmed scraped successfully by a standalone Prometheus
-container; post-deployment performance tracking script sending real requests with known
-true labels to the live deployed model and reporting accuracy.
-
-## M4 Task 3 — Negative test: pipeline fails closed on smoke test failure
-
-Deliberately pointed the `deploy` job's smoke test at the wrong port (`9999` instead of
-`8080`) via a temporary commit, pushed, and watched the real run (id `33298788960`,
-commit `9615cfb`) to completion:
-- `Apply manifests and roll out new image` → **succeeded** — the real deployment/rollout
-  was never touched, proving the smoke test failure is isolated and doesn't corrupt the
-  actual deploy step.
-- `Post-deploy smoke test` → **failed** as expected, after the full 20×3s retry loop.
-- Overall `deploy` job and workflow run → **conclusion: failure**.
-- Confirmed the live service was completely unaffected throughout
-  (`curl http://localhost:8080/health` → still `{"status":"healthy"}`).
-
-This is real evidence (not just code that claims to) that the pipeline genuinely fails
-closed when a post-deploy smoke test fails, satisfying M4's explicit requirement.
-Reverted the port back to `8080` immediately after confirming the failure.
-
-## Next up (not yet done)
-
-- Commit the revert (`.github/workflows/ci.yml` back to port 8080) together with the
-  still-pending M5 files from earlier (`scripts/post_deploy_eval.py`,
-  `outputs/post_deploy_eval.json`, `requirements.txt`, `RUNBOOK.md` updates) — these
-  never actually got committed in an earlier session step despite being reported done.
-- Final deliverables: zip of source code + configs (DVC/CI-CD/Docker/K8s manifests) +
-  trained model artifacts + `mlruns/` (MLflow run history, gitignored but should be
-  included in the zip per earlier M1 decision), and a <5 min screen recording of the
-  full workflow from code change to deployed model prediction.
+All 5 modules (M1–M5) implemented and verified against the real running system — not
+just written. See [README.md](README.md) for setup, module-by-module commands, and
+project structure.
