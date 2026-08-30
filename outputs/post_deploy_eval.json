@@ -1,0 +1,77 @@
+{
+  "base_url": "http://localhost:8080",
+  "n_requests": 10,
+  "accuracy": 0.7,
+  "results": [
+    {
+      "file": "dog_00009.jpg",
+      "true_label": "dog",
+      "predicted_label": "dog",
+      "probability": 0.9617531299591064,
+      "correct": true
+    },
+    {
+      "file": "cat_00022.jpg",
+      "true_label": "cat",
+      "predicted_label": "dog",
+      "probability": 0.8404241800308228,
+      "correct": false
+    },
+    {
+      "file": "cat_00196.jpg",
+      "true_label": "cat",
+      "predicted_label": "dog",
+      "probability": 0.5807125568389893,
+      "correct": false
+    },
+    {
+      "file": "cat_00104.jpg",
+      "true_label": "cat",
+      "predicted_label": "cat",
+      "probability": 0.7904844284057617,
+      "correct": true
+    },
+    {
+      "file": "cat_00068.jpg",
+      "true_label": "cat",
+      "predicted_label": "cat",
+      "probability": 0.5227302312850952,
+      "correct": true
+    },
+    {
+      "file": "cat_00013.jpg",
+      "true_label": "cat",
+      "predicted_label": "cat",
+      "probability": 0.6816367506980896,
+      "correct": true
+    },
+    {
+      "file": "dog_00027.jpg",
+      "true_label": "dog",
+      "predicted_label": "dog",
+      "probability": 0.9922203421592712,
+      "correct": true
+    },
+    {
+      "file": "dog_00137.jpg",
+      "true_label": "dog",
+      "predicted_label": "dog",
+      "probability": 0.8797942996025085,
+      "correct": true
+    },
+    {
+      "file": "dog_00068.jpg",
+      "true_label": "dog",
+      "predicted_label": "cat",
+      "probability": 0.5892153084278107,
+      "correct": false
+    },
+    {
+      "file": "dog_00097.jpg",
+      "true_label": "dog",
+      "predicted_label": "dog",
+      "probability": 0.9320099949836731,
+      "correct": true
+    }
+  ]
+}

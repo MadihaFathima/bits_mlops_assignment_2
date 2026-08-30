@@ -23,6 +23,7 @@ python-multipart==0.0.32
 
 # --- Monitoring (M5) ---
 prometheus-client==0.26.0
+requests==2.34.2
 
 # --- Testing (M3) ---
 pytest==8.4.2

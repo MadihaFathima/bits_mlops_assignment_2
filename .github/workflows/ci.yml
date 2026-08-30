@@ -95,7 +95,7 @@ jobs:
           $healthy = $false
           for ($i = 0; $i -lt 20; $i++) {
             try {
-              $resp = Invoke-WebRequest -Uri http://localhost:9999/health -UseBasicParsing -TimeoutSec 5
+              $resp = Invoke-WebRequest -Uri http://localhost:8080/health -UseBasicParsing -TimeoutSec 5
               if ($resp.StatusCode -eq 200) { $healthy = $true; break }
             } catch {
               Write-Output "Waiting for service..."

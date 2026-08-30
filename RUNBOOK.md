@@ -607,18 +607,86 @@ proper Prometheus-format output, confirmed populated correctly after a real requ
 `predictions_total{label="dog"} 1.0`. **M5 Task 1 logging/metrics code verified working
 locally.**
 
+Pushed (commit `f84ca1b`), CI running: `test` passed, `build-and-push`/`deploy` in
+progress at time of writing.
+
+## M5 Task 2 — Post-deployment performance tracking
+
+- `scripts/post_deploy_eval.py`: samples a small balanced batch (default 15/class) from
+  `data/processed/test/{cat,dog}` with a fixed seed, sends each image as a **real HTTP
+  request** to the *actually deployed* service's `/predict` endpoint (default
+  `http://localhost:8080`), compares each prediction against the known true label from
+  the folder it came from, and reports overall accuracy. Writes a full per-sample report
+  (file, true label, predicted label, probability, correct/incorrect) to
+  `outputs/post_deploy_eval.json`. Directly satisfies the assignment's "collect a small
+  batch of real or simulated requests and true labels" wording — these are real requests
+  against the live deployed model, with genuine ground-truth labels, not synthetic data.
+- Added `requests==2.34.2` to `requirements.txt` (was already present transitively via
+  other deps, but now a direct import).
+- **Verified working**: ran against the (at-the-time still old-image) live deployment,
+  10 samples → 70% accuracy, consistent with the model's known ~76% overall test
+  accuracy given the small sample size.
+
+**Confirmed working end-to-end**: CI run for commit `f84ca1b` completed successfully
+(`test` → `build-and-push` → `deploy` all green), watched the live rollout directly via
+`kubectl get pods` (old pods replaced one at a time, both new pods reached `1/1 Running`),
+confirmed `/health` and `/metrics` both live on the real deployed service at
+`localhost:8080`.
+
+**Prometheus container name conflict**: `docker run --name prometheus ...` failed —
+`docker inspect prometheus` revealed an *exited* container left over from Assignment 1
+(mounted to `D:/Bits-SEM3/Assignment/monitoring/prometheus.yml`, created back in July).
+Consistent with how the K8s port-80 conflict was handled earlier, didn't touch/remove the
+old container — just used a different name, `prometheus-cats-dogs`, for this project's
+instance:
+```
+docker run -d --name prometheus-cats-dogs -p 9090:9090 -v "d:\Bits-SEM3\mlops_assignment_2\monitoring\prometheus.yml:/etc/prometheus/prometheus.yml" prom/prometheus
+```
+**Verified**: `cats-dogs-api` target shows `UP` at `http://localhost:9090/targets`.
+
+**Clarified what needs to keep running vs. what was just a dev aid**: the K8s-deployed
+pods (port 8080) are the real, continuously-running deployment — that's what the CI/CD
+pipeline manages and what the demo video should show. The local `uvicorn --reload`
+instance (port 8000) was only ever a coding convenience for iterating on `main.py`
+without a full rebuild/redeploy cycle each time — not part of the deployed system, safe
+to stop. Prometheus is a separate external monitor scraping the always-live `/metrics`
+endpoint — not required to run continuously for the assignment's actual requirement (the
+endpoint itself satisfies that), but useful to keep up until report/demo screenshots are
+captured; trivially restartable later with the same command.
+
+## M5 — complete
+
+Both M5 tasks done and verified live: request/response logging (method/path/status/
+latency, no sensitive data) and Prometheus metrics (`api_requests_total`,
+`api_request_latency_seconds`, `predictions_total`) exposed at `/metrics` on the actual
+K8s-deployed service, confirmed scraped successfully by a standalone Prometheus
+container; post-deployment performance tracking script sending real requests with known
+true labels to the live deployed model and reporting accuracy.
+
+## M4 Task 3 — Negative test: pipeline fails closed on smoke test failure
+
+Deliberately pointed the `deploy` job's smoke test at the wrong port (`9999` instead of
+`8080`) via a temporary commit, pushed, and watched the real run (id `33298788960`,
+commit `9615cfb`) to completion:
+- `Apply manifests and roll out new image` → **succeeded** — the real deployment/rollout
+  was never touched, proving the smoke test failure is isolated and doesn't corrupt the
+  actual deploy step.
+- `Post-deploy smoke test` → **failed** as expected, after the full 20×3s retry loop.
+- Overall `deploy` job and workflow run → **conclusion: failure**.
+- Confirmed the live service was completely unaffected throughout
+  (`curl http://localhost:8080/health` → still `{"status":"healthy"}`).
+
+This is real evidence (not just code that claims to) that the pipeline genuinely fails
+closed when a post-deploy smoke test fails, satisfying M4's explicit requirement.
+Reverted the port back to `8080` immediately after confirming the failure.
+
 ## Next up (not yet done)
 
-- Commit + push (`src/api/main.py`, `requirements.txt`, `docker/requirements.txt`,
-  `monitoring/`), let CI auto-deploy, then run the standalone Prometheus container
-  (`docker run -d --name prometheus -p 9090:9090 -v
-  "d:\Bits-SEM3\mlops_assignment_2\monitoring\prometheus.yml:/etc/prometheus/prometheus.yml"
-  prom/prometheus`) and verify the `cats-dogs-api` target shows `UP` at
-  `http://localhost:9090/targets`.
-- M5 Task 2: post-deployment performance tracking script (send a batch of real requests
-  with known true labels from the test set to the deployed `/predict` endpoint, report
-  accuracy) — not started yet.
-- M4 Task 3 (optional extra confidence, still pending from before M5): deliberately break
-  something to confirm the pipeline fails closed when the smoke test fails.
-- Final deliverables once M5 is done: zip of source code + configs (DVC/CI-CD/Docker/K8s)
-  + trained model artifacts, and a <5 min screen recording of the full workflow.
+- Commit the revert (`.github/workflows/ci.yml` back to port 8080) together with the
+  still-pending M5 files from earlier (`scripts/post_deploy_eval.py`,
+  `outputs/post_deploy_eval.json`, `requirements.txt`, `RUNBOOK.md` updates) — these
+  never actually got committed in an earlier session step despite being reported done.
+- Final deliverables: zip of source code + configs (DVC/CI-CD/Docker/K8s manifests) +
+  trained model artifacts + `mlruns/` (MLflow run history, gitignored but should be
+  included in the zip per earlier M1 decision), and a <5 min screen recording of the
+  full workflow from code change to deployed model prediction.
