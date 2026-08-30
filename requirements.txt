@@ -21,6 +21,9 @@ uvicorn==0.52.4
 pydantic==2.13.4
 python-multipart==0.0.32
 
+# --- Monitoring (M5) ---
+prometheus-client==0.26.0
+
 # --- Testing (M3) ---
 pytest==8.4.2
 httpx==0.28.1

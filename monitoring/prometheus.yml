@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: cats-dogs-api
+    static_configs:
+      # host.docker.internal: Docker Desktop's special DNS name for reaching the host
+      # machine from inside a container. The API is deployed via Kubernetes and exposed
+      # on the host at localhost:8080 (see k8s/service.yaml), which Prometheus (itself
+      # running as a separate Docker container, not inside the cluster) reaches this way.
+      - targets: ["host.docker.internal:8080"]

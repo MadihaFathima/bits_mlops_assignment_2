@@ -549,11 +549,76 @@ approval click first. Considered making the repo private instead but kept it pub
 (zip file remains the primary grading deliverable either way; current settings already
 minimize real exposure).
 
+**Confirmed working end-to-end** after the timeout fix: all three jobs (`test`,
+`build-and-push`, `deploy`) passed. Verified the live cluster directly: 2/2 pods
+`Running`, `curl http://localhost:8080/health` → `{"status":"healthy"}`, and a real
+`/predict` call correctly classified a cat test image (88.9% confidence).
+
+## M4 — complete
+
+All three M4 tasks done and verified live: Kubernetes Deployment + Service manifests for
+Docker Desktop's built-in cluster, a genuinely automatic CD flow (self-hosted GitHub
+Actions runner picks up every push to `main`, rolls out the newly-built image, and runs a
+post-deploy smoke test that fails the pipeline on a bad deploy) — the full loop from code
+change to a live, correctly-predicting deployed service, unattended.
+
+## M5 Task 1 — in progress: Logging & Metrics
+
+**Code written (not yet committed/pushed):**
+- `src/api/main.py` updated with:
+  - `@app.middleware("http")` (`log_and_measure_requests`) — logs method/path/status/
+    latency_ms via Python `logging` for every request (metadata only, never request/
+    response bodies — satisfies "excluding sensitive data").
+  - Prometheus metrics via `prometheus_client`: `api_requests_total` (Counter, labels
+    method/path/status), `api_request_latency_seconds` (Histogram, label path),
+    `predictions_total` (Counter, label=predicted label, incremented in `/predict`).
+  - New `GET /metrics` endpoint returning `generate_latest()`.
+- Added `prometheus-client==0.26.0` to both `requirements.txt` and
+  `docker/requirements.txt`.
+- Created `monitoring/prometheus.yml` — scrape config targeting
+  `host.docker.internal:8080` (Docker Desktop's DNS name for reaching the host from a
+  container; that's where the K8s-deployed service is exposed per `k8s/service.yaml`).
+- **None of this is committed or pushed yet.**
+
+**Currently debugging — unresolved when session paused for a laptop restart:**
+`GET /metrics` returns `404 Not Found` against the locally-run
+`uvicorn src.api.main:app --reload --port 8000`, even after:
+- Confirming `pip install prometheus-client==0.26.0` succeeded with no import errors on
+  a clean uvicorn restart (startup log showed "Application startup complete", no
+  exceptions).
+- Confirming `/health` still returns 200 correctly from the same running process.
+- Reading `src/api/main.py` directly off disk and confirming the `/metrics` route *is*
+  present in the source file exactly as intended.
+- **Smoking gun**: `curl http://localhost:8000/openapi.json` shows the running app's
+  actual registered routes are only `['/health', '/predict']` — `/metrics` is missing
+  from the live app's route table entirely, despite being in the source file on disk.
+  This means the running process is not actually executing the current `main.py` content
+  — classic symptom of either (a) a stale/orphaned uvicorn process still bound to port
+  8000 from an earlier session (Ctrl+C may not have fully killed a child "server
+  process" spawped by the `--reload` reloader), or (b) a stale compiled `.pyc` /
+  `__pycache__` artifact being imported instead of the current source, or (c) some other
+  process on this machine already holding port 8000.
+**Resolved after laptop restart** (as suspected): the reboot cleared whatever stale
+process/state was holding port 8000. Fresh `uvicorn --reload` run afterward showed all
+three routes correctly (`['/health', '/metrics', '/predict']`), and `/metrics` returned
+proper Prometheus-format output, confirmed populated correctly after a real request:
+`api_requests_total{method="POST",path="/predict",status="200"} 1.0`,
+`api_request_latency_seconds` histogram buckets per path, and
+`predictions_total{label="dog"} 1.0`. **M5 Task 1 logging/metrics code verified working
+locally.**
+
 ## Next up (not yet done)
 
-- Push the rollout-timeout fix, confirm the `deploy` job succeeds end-to-end (manifests
-  applied, image rolled out to the exact commit's tag, post-deploy smoke test passes).
-- M4 Task 3 verification: confirm the pipeline actually fails if a smoke test fails
-  (already implemented via `exit 1`, worth a deliberate negative test before final
-  submission).
-- M5: Monitoring, Logs & Final Submission.
+- Commit + push (`src/api/main.py`, `requirements.txt`, `docker/requirements.txt`,
+  `monitoring/`), let CI auto-deploy, then run the standalone Prometheus container
+  (`docker run -d --name prometheus -p 9090:9090 -v
+  "d:\Bits-SEM3\mlops_assignment_2\monitoring\prometheus.yml:/etc/prometheus/prometheus.yml"
+  prom/prometheus`) and verify the `cats-dogs-api` target shows `UP` at
+  `http://localhost:9090/targets`.
+- M5 Task 2: post-deployment performance tracking script (send a batch of real requests
+  with known true labels from the test set to the deployed `/predict` endpoint, report
+  accuracy) — not started yet.
+- M4 Task 3 (optional extra confidence, still pending from before M5): deliberately break
+  something to confirm the pipeline fails closed when the smoke test fails.
+- Final deliverables once M5 is done: zip of source code + configs (DVC/CI-CD/Docker/K8s)
+  + trained model artifacts, and a <5 min screen recording of the full workflow.
