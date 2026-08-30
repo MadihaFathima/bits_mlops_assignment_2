@@ -22,10 +22,10 @@ spec:
             - containerPort: 8000
           resources:
             requests:
-              cpu: 250m
+              cpu: 500m
               memory: 256Mi
             limits:
-              cpu: 500m
+              cpu: 1000m
               memory: 512Mi
           startupProbe:
             httpGet:
@@ -38,8 +38,10 @@ spec:
               path: /health
               port: 8000
             periodSeconds: 5
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
             periodSeconds: 10
+            timeoutSeconds: 5

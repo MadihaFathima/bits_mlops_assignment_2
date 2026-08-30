@@ -101,6 +101,24 @@ correctly.
   - `POST /predict` → multipart file upload, validates it's an image, returns
     `{label, probability, class_probabilities}`
 
+**Troubleshooting — found during M5 post-deployment load testing, fixed here since it's
+an inference-service design issue**: running `scripts/post_deploy_eval.py` against the
+live K8s deployment intermittently caused a pod to fail its liveness probe
+(`context deadline exceeded`) and get killed/restarted mid-batch, breaking in-flight
+requests with connection resets/timeouts. `kubectl describe pod` showed the pattern
+clearly: the probe failures happened right when a batch of `/predict` calls was in
+flight. Root cause: `predict_endpoint` was declared `async def`, but the actual
+inference call inside it (`predict()` — image preprocessing + a PyTorch forward pass) is
+synchronous, CPU-bound work running directly on FastAPI's single event loop. While that
+call runs, the event loop can't service *any* other request — including Kubernetes' own
+concurrent `/health` check — and under the deployment's tight CPU limit, a forward pass
+can take long enough to make the liveness probe miss its deadline entirely. **Fixed** by
+offloading the call to a thread pool (`await run_in_threadpool(predict, ...)`, from
+`fastapi.concurrency`) so the event loop stays free to answer health checks even mid-
+inference. Also loosened `k8s/deployment.yaml`'s probe `timeoutSeconds` (default is a
+strict 1s) and raised the CPU request/limit from 250m/500m to 500m/1000m for additional
+headroom.
+
 ### Environment specification
 
 - `requirements.txt` — full dev/training dependencies, pinned versions (torch/torchvision

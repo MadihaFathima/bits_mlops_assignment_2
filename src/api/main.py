@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from PIL import Image, UnidentifiedImageError
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
@@ -63,7 +64,7 @@ async def log_and_measure_requests(request: Request, call_next):
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "healthy"}
+    return {"status": "healthy", "version": "1.1"}
 
 
 @app.get("/metrics")
@@ -83,6 +84,9 @@ async def predict_endpoint(file: UploadFile = File(...)) -> dict:
     except UnidentifiedImageError:
         raise HTTPException(status_code=400, detail="Could not read uploaded file as an image")
 
-    result = predict(model_state["model"], image)
+    # Run the CPU-heavy forward pass in a thread pool, not on the event loop -- otherwise
+    # a single /predict call blocks the loop long enough that Kubernetes' concurrent
+    # /health liveness check can miss its deadline and get the pod killed mid-inference.
+    result = await run_in_threadpool(predict, model_state["model"], image)
     PREDICTIONS.labels(label=result["label"]).inc()
     return result
